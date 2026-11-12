@@ -34,7 +34,28 @@ jobs:
           java-version: '17'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+          packages: 'platforms;android-36 build-tools;36.0.0 platform-tools cmdline-tools;latest'
+
+      - name: Accept Android SDK Licenses Non-Interactively
+        run: |
+          echo "Accepting Android SDK licenses..."
+          mkdir -p "$ANDROID_HOME/licenses"
+          # Write known license hashes directly to prevent interactive license prompts
+          echo -e "\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license"
+          echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+          echo -e "\n7907f711f12b5094541804e42d46e30eb02b0461" > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license"
+          echo -e "\n601085b94cd77f0b54ff86406957099fed7926e0" > "$ANDROID_HOME/licenses/google-gdk-license"
+          echo -e "\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a" > "$ANDROID_HOME/licenses/google-tv-license"
+          # Run sdkmanager --licenses to auto-accept any remaining licenses
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || yes | sdkmanager --licenses || true
+
+      - name: Install Android Platforms and Build-Tools
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "platforms;android-35" "build-tools;36.0.0" "build-tools;35.0.0" "platform-tools" || yes | sdkmanager "platforms;android-36" "platforms;android-35" "build-tools;36.0.0" "build-tools;35.0.0" "platform-tools" || true
 
       - name: Cache Gradle Dependencies
         uses: actions/cache@v4
@@ -46,7 +67,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Generate Local Debug Keystore
+      - name: Setup Local Debug Keystore
         run: |
           if [ ! -f debug.keystore ]; then
             if [ -f debug.keystore.base64 ]; then
