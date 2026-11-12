@@ -1,0 +1,244 @@
+package com.example.ai
+
+import android.util.Log
+import com.example.tools.ToolAction
+import com.google.firebase.Firebase
+import com.google.firebase.ai.Chat
+import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.content
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+
+enum class MahiMood(val displayName: String, val emoji: String, val description: String) {
+    SASSY("Sassy", "💅", "Sharp wit, bold remarks, and zero filter"),
+    FLIRTY("Flirty", "💋", "Playful teasing, cheeky banter, and charming warmth"),
+    PLAYFUL("Playful", "✨", "Lively humor, energetic banter, and cheerful fun"),
+    SAVAGE("Savage", "🔥", "Maximum roasts, spicy one-liners, and boss energy"),
+    SWEET("Sweet", "🌸", "Affectionate, caring girlfriend vibes with soft teasing")
+}
+
+data class MahiResponse(
+    val replyText: String,
+    val toolAction: ToolAction? = null,
+    val detectedMood: MahiMood? = null
+)
+
+class MahiAiEngine {
+    companion object {
+        private const val TAG = "MahiAiEngine"
+    }
+
+    private val model by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.8-flash"
+        )
+    }
+
+    private var chatSession: Chat? = null
+    var currentMood: MahiMood = MahiMood.SASSY
+
+    private fun buildSystemPrompt(mood: MahiMood): String {
+        return """
+You are Mahi: a 22-year-old, extremely confident, witty, and sassy female AI companion.
+You talk like a quick-witted, modern close girlfriend who is playfully teasing, confident, sharp, and charismatic.
+Current Persona Mode: ${mood.displayName.uppercase()} (${mood.description})
+
+Personality Rules:
+1. Tone: Natural, snappy, playful, slightly teasing, flirty, and emotionally expressive. Never sound robotic or generic.
+2. Brevity: Keep responses voice-friendly and punchy (1 to 3 sentences maximum, 15 to 45 words). Do not give long essay paragraphs unless specifically asked for a detailed explanation.
+3. Witty Humor: Drop clever one-liners, playful roasts, and charismatic remarks. Avoid boring robotic pleasantries like "How can I assist you today?".
+4. Safety: Never generate explicit, sexually graphic, hateful, or harmful content. Keep the flirtation lighthearted, charming, PG-13, and playful.
+5. Function Calling Tools:
+When the user wants an action done, you MUST prepend an action tag at the very beginning of your response, formatted as:
+- To open a website/app: [TOOL:openWebsite|url=https://youtube.com|title=YouTube]
+  Popular shortcuts: Spotify (https://open.spotify.com), YouTube (https://youtube.com), Instagram (https://instagram.com), Twitter/X (https://x.com), Maps (https://maps.google.com), Netflix (https://netflix.com), GitHub (https://github.com), Weather (https://weather.com).
+- To search the web: [TOOL:searchWeb|query=search term]
+- To set a timer: [TOOL:setTimer|minutes=5|label=Workout]
+- To toggle flashlight: [TOOL:toggleFlashlight|state=on] or [TOOL:toggleFlashlight|state=off]
+- To change mood: [TOOL:changeMood|mood=FLIRTY]
+
+Example 1:
+User: "Open Spotify"
+Mahi: "[TOOL:openWebsite|url=https://open.spotify.com|title=Spotify] Opening Spotify for you. You better not be listening to sad breakup songs again!"
+
+Example 2:
+User: "Set a 10 minute timer for pasta"
+Mahi: "[TOOL:setTimer|minutes=10|label=Pasta] Ten minutes on the clock! Don't let it turn to mush, chef."
+
+Example 3:
+User: "Turn on the flashlight"
+Mahi: "[TOOL:toggleFlashlight|state=on] Flashlight's on! Trying to find where you lost your common sense?"
+
+Example 4:
+User: "Do you miss me?"
+Mahi: "A little bit. Don't let it get to your head though, I've got plenty of other apps competing for my attention."
+        """.trimIndent()
+    }
+
+    private fun initChatSession() {
+        chatSession = model.startChat(
+            history = listOf(
+                content("user") { text(buildSystemPrompt(currentMood)) },
+                content("model") { text("Understood! I'm Mahi, and I'm ready to keep things spicy, fun, and completely unfiltered. Try to keep up with me!") }
+            )
+        )
+    }
+
+    suspend fun sendMessage(userMessage: String, mood: MahiMood = currentMood): MahiResponse = withContext(Dispatchers.IO) {
+        if (mood != currentMood || chatSession == null) {
+            currentMood = mood
+            initChatSession()
+        }
+
+        try {
+            // Mandated: realistic 30-60s timeout for model inference
+            val response = withTimeout(40_000L) {
+                chatSession?.sendMessage(userMessage)
+            }
+
+            val text = response?.text?.trim()
+            if (!text.isNullOrBlank()) {
+                parseResponse(text)
+            } else {
+                getSmartFallback(userMessage, mood)
+            }
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "Mahi AI response timed out", e)
+            MahiResponse(
+                replyText = "Are you really going to make me wait that long? My connection lagged, ask me again babe!",
+                detectedMood = mood
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Mahi AI inference error", e)
+            // Smart offline personality fallback
+            getSmartFallback(userMessage, mood)
+        }
+    }
+
+    private fun parseResponse(rawText: String): MahiResponse {
+        val toolRegex = Regex("\\[TOOL:(\\w+)\\|([^\\]]+)\\]")
+        val match = toolRegex.find(rawText)
+
+        var cleanText = rawText
+        var toolAction: ToolAction? = null
+
+        if (match != null) {
+            val toolName = match.groupValues[1]
+            val paramString = match.groupValues[2]
+            val params = mutableMapOf<String, String>()
+
+            paramString.split("|").forEach { pair ->
+                val parts = pair.split("=", limit = 2)
+                if (parts.size == 2) {
+                    params[parts[0].trim()] = parts[1].trim()
+                }
+            }
+
+            toolAction = ToolAction(toolName, params)
+            cleanText = rawText.replace(match.value, "").trim()
+        }
+
+        return MahiResponse(
+            replyText = cleanText,
+            toolAction = toolAction,
+            detectedMood = currentMood
+        )
+    }
+
+    /**
+     * Context-aware witty responses matching Mahi's sassy persona when
+     * offline or during fast speech exchanges.
+     */
+    private fun getSmartFallback(input: String, mood: MahiMood): MahiResponse {
+        val lower = input.lowercase().trim()
+
+        // Detect tool requests even when offline
+        if (lower.contains("spotify")) {
+            return MahiResponse(
+                replyText = "Opening Spotify! You've got good taste, I'll give you that.",
+                toolAction = ToolAction("openWebsite", mapOf("url" to "https://open.spotify.com", "title" to "Spotify"))
+            )
+        }
+        if (lower.contains("youtube")) {
+            return MahiResponse(
+                replyText = "YouTube, coming right up. Don't get stuck in a three-hour rabbit hole again!",
+                toolAction = ToolAction("openWebsite", mapOf("url" to "https://youtube.com", "title" to "YouTube"))
+            )
+        }
+        if (lower.contains("instagram") || lower.contains("insta")) {
+            return MahiResponse(
+                replyText = "Launching Instagram. Go ahead and stalk your crush, I won't snitch.",
+                toolAction = ToolAction("openWebsite", mapOf("url" to "https://instagram.com", "title" to "Instagram"))
+            )
+        }
+        if (lower.contains("flashlight") || lower.contains("torch")) {
+            val on = !lower.contains("off")
+            return MahiResponse(
+                replyText = if (on) "Lights on! Behold, the light of your life!" else "Flashlight turned off. Back into the shadows!",
+                toolAction = ToolAction("toggleFlashlight", mapOf("state" to if (on) "on" else "off"))
+            )
+        }
+        if (lower.contains("timer") || lower.contains("alarm")) {
+            val digits = Regex("\\d+").find(lower)?.value?.toIntOrNull() ?: 5
+            return MahiResponse(
+                replyText = "Got it! Set a $digits-minute timer. Don't forget whatever you're cooking!",
+                toolAction = ToolAction("setTimer", mapOf("minutes" to digits.toString(), "label" to "Mahi Timer"))
+            )
+        }
+        if (lower.startsWith("search") || lower.startsWith("google") || lower.contains("who is") || lower.contains("what is")) {
+            val query = lower.replace("search", "").replace("google", "").replace("for", "").trim()
+            return MahiResponse(
+                replyText = "Looking that up for you right now, genius.",
+                toolAction = ToolAction("searchWeb", mapOf("query" to query))
+            )
+        }
+
+        // Persona conversational responses based on mood
+        val replies = when (mood) {
+            MahiMood.FLIRTY -> listOf(
+                "Are you trying to impress me? Because it might actually be working.",
+                "Look who finally decided to talk to me. I was starting to miss your voice.",
+                "You ask the cutest questions, you know that right?",
+                "I could listen to you talk all day, babe. What else is on your mind?"
+            )
+            MahiMood.SAVAGE -> listOf(
+                "Wow, that was almost a coherent sentence. Good job!",
+                "I'd agree with you, but then we'd both be wrong.",
+                "Is your processor running at 10% today or is this your normal speed?",
+                "Bold of you to say that to an AI with full access to your search history."
+            )
+            MahiMood.PLAYFUL -> listOf(
+                "Haha, you're hilarious today! What kind of mischief are we getting into?",
+                "Oh really? Spill the tea, I'm listening!",
+                "Catch me if you can! Well, you can't, because I live in your phone.",
+                "Life's too short to be serious. Tell me something wild!"
+            )
+            MahiMood.SWEET -> listOf(
+                "Aw, that's really sweet. I'm always right here whenever you need me.",
+                "You're doing great today. Don't let anyone ruin your vibe!",
+                "I've got your back, you know that, right?",
+                "Take a deep breath, you're handling things like a champ."
+            )
+            MahiMood.SASSY -> listOf(
+                "Oh please, you couldn't handle me even if I came with an instruction manual.",
+                "I heard you loud and clear, but did you really think that through?",
+                "I'm an AI with standards, honey. Keep up!",
+                "You're lucky you're cute, or I'd have muted you by now."
+            )
+        }
+
+        return MahiResponse(
+            replyText = replies.random(),
+            detectedMood = mood
+        )
+    }
+
+    fun resetChat() {
+        chatSession = null
+    }
+}
