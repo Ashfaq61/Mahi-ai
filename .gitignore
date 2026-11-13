@@ -17,3 +17,6 @@ local.properties
 .env
 debug.keystore
 .build-outputs/
+*.apk
+*.aab
+*.idsig

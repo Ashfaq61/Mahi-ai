@@ -44,13 +44,11 @@ jobs:
         run: |
           echo "Accepting Android SDK licenses..."
           mkdir -p "$ANDROID_HOME/licenses"
-          # Write known license hashes directly to prevent interactive license prompts
           echo -e "\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license"
           echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
           echo -e "\n7907f711f12b5094541804e42d46e30eb02b0461" > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license"
           echo -e "\n601085b94cd77f0b54ff86406957099fed7926e0" > "$ANDROID_HOME/licenses/google-gdk-license"
           echo -e "\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a" > "$ANDROID_HOME/licenses/google-tv-license"
-          # Run sdkmanager --licenses to auto-accept any remaining licenses
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || yes | sdkmanager --licenses || true
 
       - name: Install Android Platforms and Build-Tools
@@ -67,15 +65,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Setup Local Debug Keystore
+      - name: Restore Deterministic Debug Keystore
         run: |
-          if [ ! -f debug.keystore ]; then
-            if [ -f debug.keystore.base64 ]; then
-              base64 -d debug.keystore.base64 > debug.keystore
-            else
-              keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-            fi
+          if [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+            echo "Restored deterministic debug.keystore from debug.keystore.base64"
+          else
+            echo "ERROR: debug.keystore.base64 is missing; refusing to generate an incompatible ephemeral keystore."
+            exit 1
           fi
+          keytool -list -v -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android | grep -E "SHA1:|SHA256:"
 
       - name: Grant Execute Permission to Gradlew
         run: chmod +x gradlew || true
@@ -88,44 +87,100 @@ jobs:
         run: |
           ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Prepare & Verify Mahi AI APK
-        id: verify_apk
+      - name: Align, Sign (v1/v2/v3), and Validate Debug APK
+        id: verify_debug_apk
         run: |
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
           SOURCE_APK="app/build/outputs/apk/debug/app-debug.apk"
-          TARGET_APK="app/build/outputs/apk/debug/mahi-ai-debug.apk"
-          
-          if [ -f "$SOURCE_APK" ]; then
-            cp "$SOURCE_APK" "$TARGET_APK"
-            cp "$SOURCE_APK" "mahi-ai-debug.apk"
-          else
+          ALIGNED_APK="app/build/outputs/apk/debug/app-debug-aligned.apk"
+          FINAL_APK="mahi-ai-debug.apk"
+
+          if [ ! -f "$SOURCE_APK" ]; then
             echo "ERROR: Source APK not found at $SOURCE_APK"
             exit 1
           fi
 
-          if [ ! -s "$TARGET_APK" ]; then
+          # Ensure 4-byte zipalign and 16KB page alignment for Android 15/16+ compatibility
+          "$BUILD_TOOLS/zipalign" -f -P 16 4 "$SOURCE_APK" "$ALIGNED_APK"
+
+          # Sign with v1, v2, and v3 schemes using the deterministic debug.keystore
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks debug.keystore \
+            --ks-key-alias androiddebugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out "$FINAL_APK" \
+            "$ALIGNED_APK"
+
+          cp "$FINAL_APK" "app/build/outputs/apk/debug/mahi-ai-debug.apk"
+
+          if [ ! -s "$FINAL_APK" ]; then
             echo "ERROR: Generated APK is empty or missing!"
             exit 1
           fi
 
-          FILE_SIZE=$(stat -c%s "$TARGET_APK")
-          echo "SUCCESS: $TARGET_APK generated successfully ($FILE_SIZE bytes)."
+          echo "=== Verifying Signature (v1/v2/v3) ==="
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$FINAL_APK"
+
+          echo "=== Verifying 16KB Zipalign ==="
+          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$FINAL_APK" | tail -n 10
+
+          echo "=== Verifying Manifest & Badging ==="
+          "$BUILD_TOOLS/aapt2" dump badging "$FINAL_APK" | head -n 25
+
+          echo "=== Verifying APK Analyzer Summary ==="
+          "$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" apk summary "$FINAL_APK"
+
+          FILE_SIZE=$(stat -c%s "$FINAL_APK")
+          SHA256_SUM=$(sha256sum "$FINAL_APK" | awk '{print $1}')
+          echo "SUCCESS: $FINAL_APK verified ($FILE_SIZE bytes, sha256=$SHA256_SUM)."
           echo "apk_size=$FILE_SIZE" >> $GITHUB_OUTPUT
-          echo "apk_path=$TARGET_APK" >> $GITHUB_OUTPUT
+          echo "apk_sha256=$SHA256_SUM" >> $GITHUB_OUTPUT
+
+      - name: Build & Sign Release APK (If Signing Secrets Configured)
+        id: build_release
+        if: env.HAS_RELEASE_KEY == 'true'
+        env:
+          HAS_RELEASE_KEY: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' && secrets.STORE_PASSWORD != '' && secrets.KEY_PASSWORD != '' }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
+        run: |
+          echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > "$KEYSTORE_PATH"
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+          "$BUILD_TOOLS/zipalign" -f -P 16 4 app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/app-release-aligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$KEYSTORE_PATH" \
+            --ks-key-alias upload \
+            --ks-pass "env:STORE_PASSWORD" \
+            --key-pass "env:KEY_PASSWORD" \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out mahi-ai-release.apk \
+            app/build/outputs/apk/release/app-release-aligned.apk
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs mahi-ai-release.apk
+          rm -f "$KEYSTORE_PATH"
 
       - name: Upload APK as Workflow Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mahi-ai-debug-apk
+          name: mahi-ai-apk
           path: |
             mahi-ai-debug.apk
-            app/build/outputs/apk/debug/mahi-ai-debug.apk
+            mahi-ai-release.apk
+          if-no-files-found: warn
           retention-days: 30
 
       - name: Create GitHub Release
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
         uses: softprops/action-gh-release@v2
         with:
-          name: Mahi AI Voice Assistant v1.0 (${{ github.sha }})
+          name: Mahi AI Voice Assistant v1.0.1 (${{ github.sha }})
           tag_name: v1.0.${{ github.run_number }}
           body: |
             ### 🎙️ Mahi AI Voice Assistant - Android APK Release
@@ -134,13 +189,19 @@ jobs:
             - **Commit:** `${{ github.sha }}`
             - **Workflow Run:** #${{ github.run_number }}
             - **Package ID:** `com.aistudio.mahiai.vzrtkp`
-            - **Persona:** Sassy, Flirty, Witty AI Companion (Mahi)
-            - **Status:** Verified Successful Build ✅
+            - **Version:** `1.0.1` (`versionCode: 2`)
+            - **Architectures:** `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`
+            - **Signing:** Deterministic Debug Keystore (v1 + v2 + v3 APK Signature Schemes verified)
+            - **Alignment:** 16KB page-aligned (`zipalign -P 16 -p 4`)
+            - **SHA-256:** `${{ steps.verify_debug_apk.outputs.apk_sha256 }}`
+            - **Size:** `${{ steps.verify_debug_apk.outputs.apk_size }}` bytes
 
-            **Download:**
-            Download `mahi-ai-debug.apk` directly from the release assets below.
+            **Installation Note:**
+            If you previously installed an older test build signed with an ephemeral CI key, uninstall the prior build first so Android can install with the consistent signature. All future builds share this deterministic signature.
           files: |
             mahi-ai-debug.apk
+            mahi-ai-release.apk
+          fail_on_unmatched_files: false
           draft: false
           prerelease: false
         env:
