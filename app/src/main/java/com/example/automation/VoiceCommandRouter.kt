@@ -66,12 +66,12 @@ object VoiceCommandRouter {
     fun parseCommand(rawInput: String): RoutedVoiceCommand? {
         val clean = rawInput.trim()
         if (clean.isEmpty()) return null
-        val lower = clean.lowercase()
-            .replace("mahi,", "")
-            .replace("mahi ", "")
-            .replace("ماہی ", "")
-            .replace(".", "")
+        val cleanNoWake = clean
+            .replace(Regex("^(mahi\\s*,?\\s*|ماہی\\s+)", RegexOption.IGNORE_CASE), "")
             .trim()
+            .removeSuffix(".")
+            .trim()
+        val lower = cleanNoWake.lowercase()
 
         // 1. Immediate STOP / Ruk jao
         if (lower == "stop" || lower == "stop scrolling" || lower == "ruk jao" || lower == "ruko" ||
@@ -91,11 +91,17 @@ object VoiceCommandRouter {
                 return RoutedVoiceCommand.EndActiveCall
         }
 
-        if (lower.startsWith("call ") || lower.contains(" ko call karo") || clean.contains("کو کال کرو")) {
+        if (lower.startsWith("call ") || lower.startsWith("dial ") ||
+            lower.contains(" ko call karo") || cleanNoWake.contains("کو کال کرو")
+        ) {
             val target = when {
-                lower.startsWith("call ") -> clean.substringAfter("call ", "").trim()
-                lower.contains(" ko call karo") -> lower.substringBefore(" ko call karo").trim()
-                else -> clean.substringBefore("کو کال کرو").trim()
+                lower.startsWith("call ") -> cleanNoWake.substring(5).trim()
+                lower.startsWith("dial ") -> cleanNoWake.substring(5).trim()
+                lower.contains(" ko call karo") -> {
+                    val idx = cleanNoWake.indexOf(" ko call karo", ignoreCase = true)
+                    if (idx > 0) cleanNoWake.substring(0, idx).trim() else ""
+                }
+                else -> cleanNoWake.substringBefore("کو کال کرو").trim()
             }
             if (target.isNotBlank()) return RoutedVoiceCommand.PlaceCall(target)
         }

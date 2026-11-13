@@ -172,6 +172,10 @@ class MahiV3V4FeaturesTest {
         // Calls
         val place = VoiceCommandRouter.parseCommand("Call +923001234567") as RoutedVoiceCommand.PlaceCall
         assertEquals("+923001234567", place.target)
+        val placeWake = VoiceCommandRouter.parseCommand("Mahi, call Ali.") as RoutedVoiceCommand.PlaceCall
+        assertEquals("Ali", placeWake.target)
+        val placeRoman = VoiceCommandRouter.parseCommand("Sara ko call karo") as RoutedVoiceCommand.PlaceCall
+        assertEquals("Sara", placeRoman.target)
         assertTrue(VoiceCommandRouter.parseCommand("Answer call") is RoutedVoiceCommand.AnswerActiveCall)
 
         // Auto language detection
