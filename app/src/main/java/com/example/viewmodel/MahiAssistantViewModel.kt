@@ -1,14 +1,17 @@
 package com.example.viewmodel
 
+import android.Manifest
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.net.Uri
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.GeminiLiveCallbacks
@@ -39,6 +42,7 @@ import com.example.automation.AppLauncherManager
 import com.example.automation.AutomationHistoryEntry
 import com.example.automation.AutonomousAgentEngine
 import com.example.automation.CapturedNotification
+import com.example.automation.CommandExecutionGuard
 import com.example.automation.DeviceControlHelper
 import com.example.automation.GestureActionRecord
 import com.example.automation.InstalledAppInfo
@@ -49,6 +53,9 @@ import com.example.automation.RoutedVoiceCommand
 import com.example.automation.ScreenSnapshot
 import com.example.automation.SensitiveCategory
 import com.example.automation.VoiceCommandRouter
+import com.example.camera.CameraLensFacing
+import com.example.camera.CameraStudioState
+import com.example.camera.MahiCameraController
 import com.example.calls.ActiveCallState
 import com.example.calls.AiCallAssistantPhase
 import com.example.calls.CallAutomationPrefs
@@ -125,9 +132,10 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     private val audioRecordManager = AudioRecordManager()
     private val speechRecognitionManager = SpeechRecognitionManager(application)
     private val speechSynthesizer = MahiSpeechSynthesizer(application)
-    private val aiEngine = MahiAiEngine(providerClient)
-    private val toolsManager = MahiToolsManager(application)
+    val cameraController = MahiCameraController(application)
+    val cameraState: StateFlow<CameraStudioState> = cameraController.state
 
+    private val aiEngine = MahiAiEngine(providerClient)
     val appLauncherManager = AppLauncherManager(application)
     val neuralLensAnalyzer = NeuralLensAnalyzer(providerClient)
     private val researchEngine = ResearchEngine(providerClient = providerClient)
@@ -137,6 +145,24 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         deviceControl = deviceControlHelper,
         providerClient = providerClient
     )
+    private val commandExecutionGuard = CommandExecutionGuard(dedupWindowMs = 2_500L)
+
+    private val toolsManager = MahiToolsManager(
+        context = application,
+        cameraController = cameraController,
+        onNavigateToCamera = { _requestedTab.value = "CAMERA_STUDIO" },
+        onRunAiSearchSummary = { query -> runAiSearch(query) },
+        hasAudioPermission = {
+            ContextCompat.checkSelfPermission(
+                getApplication(),
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+        }
+    )
+
+    private var pendingTranscriptJob: Job? = null
+    private val liveTranscriptBuffer = StringBuilder()
+    private var pendingLivePromptAfterConnect: String? = null
 
     private val _uiState = MutableStateFlow(AssistantUiState())
     val uiState: StateFlow<AssistantUiState> = _uiState.asStateFlow()
@@ -439,23 +465,69 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                         errorMessage = null,
                         liveAssistantText = "Gemini Live audio active ($model). Continuous listening ON!"
                     )
+                    val queued = pendingLivePromptAfterConnect
+                    if (!queued.isNullOrBlank()) {
+                        pendingLivePromptAfterConnect = null
+                        _uiState.value = _uiState.value.copy(liveUserText = queued)
+                        geminiLiveClient.sendTextPromptOverAudioSession(queued)
+                    }
                 }
 
                 override fun onUserTranscript(text: String) {
-                    _uiState.value = _uiState.value.copy(liveUserText = text)
+                    val trimmedChunk = text.trim()
+                    if (trimmedChunk.isEmpty()) return
+
+                    // Immediate STOP / recording stop executes with 0ms latency
+                    val immediateCheck = VoiceCommandRouter.parseCommand(trimmedChunk)
+                    if (immediateCheck is RoutedVoiceCommand.StopEverything ||
+                        immediateCheck is RoutedVoiceCommand.StopVideoRecording
+                    ) {
+                        pendingTranscriptJob?.cancel()
+                        liveTranscriptBuffer.clear()
+                        viewModelScope.launch {
+                            executeRoutedVoiceCommand(immediateCheck, originalUtterance = trimmedChunk)
+                        }
+                        return
+                    }
+
+                    // Accumulate streaming transcription chunks safely without prematurely firing partials
+                    val accumulated = synchronized(liveTranscriptBuffer) {
+                        val existing = liveTranscriptBuffer.toString().trim()
+                        val updated = when {
+                            existing.isEmpty() -> trimmedChunk
+                            trimmedChunk.startsWith(existing, ignoreCase = true) -> trimmedChunk
+                            existing.endsWith(trimmedChunk, ignoreCase = true) -> existing
+                            else -> "$existing $trimmedChunk"
+                        }.takeLast(220)
+                        liveTranscriptBuffer.clear()
+                        liveTranscriptBuffer.append(updated)
+                        updated
+                    }
+
+                    _uiState.value = _uiState.value.copy(liveUserText = accumulated)
                     if (userPrefs.value.autoLanguageDetection) {
-                        val detected = VoiceCommandRouter.detectLanguageFromUtterance(text, userPrefs.value.language)
+                        val detected = VoiceCommandRouter.detectLanguageFromUtterance(accumulated, userPrefs.value.language)
                         if (detected != userPrefs.value.language) {
                             setLanguage(detected)
                         }
                     }
-                    // Immediate voice-triggered local command / STOP interception
-                    viewModelScope.launch {
-                        val routed = VoiceCommandRouter.parseCommand(text)
-                        if (routed is RoutedVoiceCommand.StopEverything) {
-                            executeRoutedVoiceCommand(routed)
-                        } else if (routed is RoutedVoiceCommand.ExecuteGesture || routed is RoutedVoiceCommand.LaunchApp) {
-                            executeRoutedVoiceCommand(routed)
+
+                    pendingTranscriptJob?.cancel()
+                    pendingTranscriptJob = viewModelScope.launch {
+                        // Wait briefly so partial speech ("Mahi, open...") settles cleanly into complete command
+                        delay(550L)
+                        val settledUtterance = synchronized(liveTranscriptBuffer) {
+                            liveTranscriptBuffer.toString().trim()
+                        }
+                        if (settledUtterance.isBlank() || VoiceCommandRouter.isLikelyIncompletePartial(settledUtterance)) {
+                            return@launch
+                        }
+                        val routed = VoiceCommandRouter.parseCommand(settledUtterance)
+                        if (routed != null && commandExecutionGuard.shouldExecute(routed.deduplicationKey())) {
+                            synchronized(liveTranscriptBuffer) { liveTranscriptBuffer.clear() }
+                            executeRoutedVoiceCommand(routed, originalUtterance = settledUtterance)
+                        } else if (settledUtterance.length > 60) {
+                            synchronized(liveTranscriptBuffer) { liveTranscriptBuffer.clear() }
                         }
                     }
                 }
@@ -481,7 +553,19 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
                 override fun onToolCall(id: String, action: ToolAction) {
                     viewModelScope.launch {
-                        val result = toolsManager.execute(action)
+                        val dedupKey = toolActionDeduplicationKey(action)
+                        val result = if (dedupKey != null && !commandExecutionGuard.shouldExecute(dedupKey)) {
+                            ToolExecutionResult(
+                                actionName = action.name,
+                                displayTitle = action.name,
+                                message = "Command already executed cleanly.",
+                                isSuccess = true
+                            )
+                        } else {
+                            synchronized(liveTranscriptBuffer) { liveTranscriptBuffer.clear() }
+                            pendingTranscriptJob?.cancel()
+                            toolsManager.execute(action)
+                        }
                         _uiState.value = _uiState.value.copy(lastExecutedTool = result)
                         if (action.name.equals("changeMood", ignoreCase = true)) {
                             val moodName = action.params["mood"]
@@ -622,11 +706,13 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
             }
         }
 
-        // Handle immediate deterministic Android automation commands (STOP, TikTok/FB/YouTube, gestures, calls)
+        // Handle immediate deterministic Android automation commands (STOP, apps, Google search, camera, gestures, calls)
         val routed = VoiceCommandRouter.parseCommand(query)
         if (routed != null) {
-            viewModelScope.launch {
-                executeRoutedVoiceCommand(routed, originalUtterance = query)
+            if (commandExecutionGuard.shouldExecute(routed.deduplicationKey())) {
+                viewModelScope.launch {
+                    executeRoutedVoiceCommand(routed, originalUtterance = query)
+                }
             }
             return
         }
@@ -653,6 +739,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 )
                 return
             }
+            pendingLivePromptAfterConnect = query
             startSession()
             return
         }
@@ -742,6 +829,27 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
+    private fun toolActionDeduplicationKey(action: ToolAction): String? {
+        return when (action.name.lowercase().trim()) {
+            "openapp" -> {
+                val target = (action.params["appName"] ?: action.params["title"] ?: "").lowercase().trim()
+                if (target == "google") "OPEN_GOOGLE" else "LAUNCH:$target:"
+            }
+            "opengoogle" -> "OPEN_GOOGLE"
+            "googlesearch" -> "GOOGLE_SEARCH:${(action.params["query"] ?: "").lowercase().trim()}"
+            "youtubesearch" -> "YT_SEARCH:${(action.params["query"] ?: "").lowercase().trim()}"
+            "openwebsite" -> "OPEN_SITE:${(action.params["url"] ?: "").lowercase().trim()}"
+            "opencamera" -> {
+                val front = action.params["frontOrBack"]?.contains("front", true) == true
+                "OPEN_CAM:${if (front) "FRONT" else "BACK"}"
+            }
+            "capturephoto" -> "CAPTURE_PHOTO:${action.params["isSelfie"]?.lowercase() == "true"}"
+            "startvideorecording" -> "START_VIDEO"
+            "stopvideorecording" -> "STOP_VIDEO"
+            else -> null
+        }
+    }
+
     private suspend fun executeRoutedVoiceCommand(
         routed: RoutedVoiceCommand,
         originalUtterance: String = ""
@@ -755,6 +863,9 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
             RoutedVoiceCommand.StopEverything -> {
                 MahiAccessibilityService.stopAllGestures()
                 autonomousAgentEngine.stop()
+                if (cameraController.state.value.isRecordingVideo) {
+                    cameraController.stopVideoRecording()
+                }
                 cardTitle = "Stopped Immediately"
                 outcomeText = "Stopped all gestures and running automation."
             }
@@ -769,12 +880,73 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                     MahiAccessibilityService.executeGestureIntent(routed.followUpGesture)
                 }
             }
+            RoutedVoiceCommand.OpenGoogle -> {
+                val res = appLauncherManager.openGoogleApp()
+                ok = res.success
+                cardTitle = res.appName
+                cardUrl = res.fallbackUrl
+                outcomeText = res.message
+            }
+            is RoutedVoiceCommand.GoogleSearch -> {
+                val res = appLauncherManager.openGoogleSearch(routed.query)
+                ok = res.success
+                cardTitle = "Google: ${routed.query}"
+                cardUrl = res.fallbackUrl
+                outcomeText = res.message
+                runAiSearch(routed.query)
+            }
             is RoutedVoiceCommand.SearchYouTube -> {
                 val res = appLauncherManager.openYouTubeSearch(routed.query)
                 ok = res.success
                 cardTitle = "YouTube: ${routed.query}"
                 cardUrl = res.fallbackUrl
                 outcomeText = res.message
+            }
+            is RoutedVoiceCommand.OpenWebsite -> {
+                val res = appLauncherManager.openWebsite(routed.url)
+                ok = res.success
+                cardTitle = "Website"
+                cardUrl = res.fallbackUrl
+                outcomeText = res.message
+            }
+            is RoutedVoiceCommand.OpenCamera -> {
+                outcomeText = cameraController.prepareOpenCamera(routed.lens)
+                cardTitle = "Camera (${routed.lens.name})"
+                _requestedTab.value = "CAMERA_STUDIO"
+            }
+            is RoutedVoiceCommand.SwitchCamera -> {
+                outcomeText = cameraController.requestSwitchCamera(routed.lens)
+                cardTitle = "Switch Camera"
+                _requestedTab.value = "CAMERA_STUDIO"
+            }
+            is RoutedVoiceCommand.CapturePhoto -> {
+                outcomeText = cameraController.requestPhotoOrSelfie(
+                    isSelfie = routed.isSelfie,
+                    countdownSeconds = if (routed.isSelfie) 3 else 0
+                )
+                cardTitle = if (routed.isSelfie) "Selfie (3s)" else "Capture Photo"
+                _requestedTab.value = "CAMERA_STUDIO"
+            }
+            RoutedVoiceCommand.StartVideoRecording -> {
+                val hasAudio = ContextCompat.checkSelfPermission(
+                    getApplication(),
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                outcomeText = cameraController.requestStartVideoRecording(hasAudio)
+                cardTitle = "Video Recording"
+                _requestedTab.value = "CAMERA_STUDIO"
+            }
+            RoutedVoiceCommand.StopVideoRecording -> {
+                outcomeText = cameraController.stopVideoRecording()
+                cardTitle = "Video Saved"
+            }
+            is RoutedVoiceCommand.SetCameraFlash -> {
+                outcomeText = cameraController.setFlashEnabled(routed.enabled)
+                cardTitle = if (routed.enabled) "Flash ON" else "Flash OFF"
+            }
+            is RoutedVoiceCommand.SetCameraZoom -> {
+                outcomeText = cameraController.adjustZoomBy(routed.deltaStep)
+                cardTitle = "Camera Zoom"
             }
             is RoutedVoiceCommand.ExecuteGesture -> {
                 val gOut = MahiAccessibilityService.executeGestureIntent(routed.gesture)
@@ -1184,6 +1356,71 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         return result
     }
 
+    fun openGoogleAppDirect(): AppLaunchResult {
+        val result = appLauncherManager.openGoogleApp()
+        _uiState.value = _uiState.value.copy(
+            lastExecutedTool = ToolExecutionResult(
+                actionName = "openGoogle",
+                displayTitle = result.appName,
+                message = result.message,
+                linkUrl = result.fallbackUrl,
+                isSuccess = result.success
+            )
+        )
+        return result
+    }
+
+    // --- Camera Studio Controls ---
+
+    fun openCameraMode(lens: CameraLensFacing = CameraLensFacing.BACK) {
+        cameraController.prepareOpenCamera(lens)
+        _requestedTab.value = "CAMERA_STUDIO"
+    }
+
+    fun switchCameraLens(lens: CameraLensFacing) {
+        val msg = cameraController.requestSwitchCamera(lens)
+        _uiState.value = _uiState.value.copy(
+            lastExecutedTool = ToolExecutionResult("switchCamera", "Camera Lens", msg, isSuccess = true)
+        )
+    }
+
+    fun capturePhotoOrSelfie(isSelfie: Boolean) {
+        val msg = cameraController.requestPhotoOrSelfie(isSelfie = isSelfie, countdownSeconds = if (isSelfie) 3 else 0)
+        _requestedTab.value = "CAMERA_STUDIO"
+        _uiState.value = _uiState.value.copy(
+            lastExecutedTool = ToolExecutionResult("capturePhoto", if (isSelfie) "Selfie (3s)" else "Photo", msg, isSuccess = true)
+        )
+    }
+
+    fun toggleVideoRecording() {
+        val hasAudio = ContextCompat.checkSelfPermission(
+            getApplication(),
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        val msg = if (cameraController.state.value.isRecordingVideo) {
+            cameraController.stopVideoRecording()
+        } else {
+            _requestedTab.value = "CAMERA_STUDIO"
+            cameraController.requestStartVideoRecording(hasAudio)
+        }
+        _uiState.value = _uiState.value.copy(
+            lastExecutedTool = ToolExecutionResult("videoRecording", "Video Studio", msg, isSuccess = true)
+        )
+    }
+
+    fun toggleCameraFlash() {
+        val next = !cameraController.state.value.isFlashEnabled
+        cameraController.setFlashEnabled(next)
+    }
+
+    fun adjustCameraZoom(delta: Float) {
+        cameraController.adjustZoomBy(delta)
+    }
+
+    fun launchSystemCameraFallback(mode: String) {
+        cameraController.launchSystemCameraFallback(mode)
+    }
+
     fun runAgentGoal(goal: String) {
         if (goal.isBlank()) return
         val state = apiManagerState.value
@@ -1416,6 +1653,8 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
     override fun onCleared() {
         super.onCleared()
+        pendingTranscriptJob?.cancel()
+        cameraController.releaseCamera()
         audioRecordManager.onPcmAudioFrame = null
         audioRecordManager.stopListening()
         speechRecognitionManager.release()

@@ -131,10 +131,10 @@ class GeminiLiveClient(
             }.toString()
         }
 
-        private fun buildToolDeclarations(): JSONArray = JSONArray().apply {
+        fun buildToolDeclarations(): JSONArray = JSONArray().apply {
             put(JSONObject().apply {
                 put("name", "openApp")
-                put("description", "Launch an Android app on the phone such as TikTok, Facebook, YouTube, WhatsApp, Instagram, Spotify, or any installed app.")
+                put("description", "Launch any installed Android app on the phone such as Facebook, TikTok, YouTube, Google, Chrome, WhatsApp, Instagram, Spotify, Settings, or Camera.")
                 put("parameters", JSONObject().apply {
                     put("type", "OBJECT")
                     put("properties", JSONObject().apply {
@@ -146,8 +146,107 @@ class GeminiLiveClient(
                 })
             })
             put(JSONObject().apply {
+                put("name", "openCamera")
+                put("description", "Open the Camera Studio with live CameraX preview (back or front lens).")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("frontOrBack", JSONObject().apply { put("type", "STRING") })
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "switchCamera")
+                put("description", "Switch active camera between front selfie lens and back lens.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("frontOrBack", JSONObject().apply { put("type", "STRING") })
+                    })
+                    put("required", JSONArray().apply { put("frontOrBack") })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "capturePhoto")
+                put("description", "Capture a photo or 3-second countdown selfie and save it to MediaStore Gallery.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("isSelfie", JSONObject().apply { put("type", "BOOLEAN") })
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "startVideoRecording")
+                put("description", "Start visible video recording with live timer using CameraX.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "stopVideoRecording")
+                put("description", "Stop the active CameraX video recording and save the MP4 to MediaStore Movies.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "setFlash")
+                put("description", "Enable or disable camera flash or torch.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("enabled", JSONObject().apply { put("type", "BOOLEAN") })
+                    })
+                    put("required", JSONArray().apply { put("enabled") })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "setZoom")
+                put("description", "Adjust camera zoom ratio level (e.g. 1.0, 1.5, 2.0) or step direction ('in' / 'out').")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("level", JSONObject().apply { put("type", "STRING") })
+                    })
+                    put("required", JSONArray().apply { put("level") })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "openGoogle")
+                put("description", "Open the Google Search app or Google homepage.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "googleSearch")
+                put("description", "Search Google for a query using the Google app or browser with proper URL encoding and show summary options.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("query", JSONObject().apply { put("type", "STRING") })
+                    })
+                    put("required", JSONArray().apply { put("query") })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "youtubeSearch")
+                put("description", "Search YouTube natively for videos matching the query.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("query", JSONObject().apply { put("type", "STRING") })
+                    })
+                    put("required", JSONArray().apply { put("query") })
+                })
+            })
+            put(JSONObject().apply {
                 put("name", "openWebsite")
-                put("description", "Open a website URL or web app on the user's phone.")
+                put("description", "Open a website URL in Chrome or the default browser on the user's phone.")
                 put("parameters", JSONObject().apply {
                     put("type", "OBJECT")
                     put("properties", JSONObject().apply {
@@ -155,6 +254,25 @@ class GeminiLiveClient(
                         put("title", JSONObject().apply { put("type", "STRING") })
                     })
                     put("required", JSONArray().apply { put("url") })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "verifyAppLaunch")
+                put("description", "Verify whether a specific Android package name is installed, enabled, and launchable.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("packageName", JSONObject().apply { put("type", "STRING") })
+                    })
+                    put("required", JSONArray().apply { put("packageName") })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "stopAutomation")
+                put("description", "Immediately stop all running screen gestures, scrolling, and autonomous automation.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
                 })
             })
             put(JSONObject().apply {
@@ -171,7 +289,7 @@ class GeminiLiveClient(
             })
             put(JSONObject().apply {
                 put("name", "searchWeb")
-                put("description", "Search the web or YouTube for a query.")
+                put("description", "General web or YouTube search fallback.")
                 put("parameters", JSONObject().apply {
                     put("type", "OBJECT")
                     put("properties", JSONObject().apply {

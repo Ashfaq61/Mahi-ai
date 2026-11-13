@@ -1,5 +1,6 @@
 package com.example.automation
 
+import android.app.SearchManager
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Context
@@ -50,7 +51,7 @@ class AppLauncherManager(private val context: Context) {
         val KNOWN_APPS: List<KnownAppDescriptor> = listOf(
             KnownAppDescriptor(
                 canonicalName = "TikTok",
-                aliases = listOf("tiktok", "tik tok", "tik-tok", "ٹک ٹاک", "ٹکٹاک", "musically"),
+                aliases = listOf("tiktok", "tik tok", "tik-tok", "ٹک ٹاک", "ٹکٹاک", "टिक टॉक", "टिकटॉक", "musically"),
                 packageCandidates = listOf(
                     "com.zhiliaoapp.musically",
                     "com.ss.android.ugc.trill",
@@ -61,7 +62,7 @@ class AppLauncherManager(private val context: Context) {
             ),
             KnownAppDescriptor(
                 canonicalName = "Facebook",
-                aliases = listOf("facebook", "fb", "face book", "فیس بک", "فیسبک"),
+                aliases = listOf("facebook", "fb", "face book", "فیس بک", "فیسبک", "फेसबुक"),
                 packageCandidates = listOf(
                     "com.facebook.katana",
                     "com.facebook.lite"
@@ -71,7 +72,7 @@ class AppLauncherManager(private val context: Context) {
             ),
             KnownAppDescriptor(
                 canonicalName = "YouTube",
-                aliases = listOf("youtube", "you tube", "yt", "یوٹیوب"),
+                aliases = listOf("youtube", "you tube", "yt", "یوٹیوب", "यूट्यूब"),
                 packageCandidates = listOf(
                     "com.google.android.youtube",
                     "com.google.android.youtube.tv",
@@ -81,29 +82,39 @@ class AppLauncherManager(private val context: Context) {
                 officialWebsiteUrl = "https://www.youtube.com"
             ),
             KnownAppDescriptor(
+                canonicalName = "Google",
+                aliases = listOf("google", "google app", "گوگل", "गूगल"),
+                packageCandidates = listOf(
+                    "com.google.android.googlequicksearchbox",
+                    "com.google.android.apps.searchlite"
+                ),
+                primaryStorePackage = "com.google.android.googlequicksearchbox",
+                officialWebsiteUrl = "https://www.google.com"
+            ),
+            KnownAppDescriptor(
                 canonicalName = "WhatsApp",
-                aliases = listOf("whatsapp", "whats app", "واٹس ایپ", "wa"),
+                aliases = listOf("whatsapp", "whats app", "واٹس ایپ", "व्हाट्सएप", "wa"),
                 packageCandidates = listOf("com.whatsapp", "com.whatsapp.w4b"),
                 primaryStorePackage = "com.whatsapp",
                 officialWebsiteUrl = "https://web.whatsapp.com"
             ),
             KnownAppDescriptor(
                 canonicalName = "Instagram",
-                aliases = listOf("instagram", "insta", "انسٹاگرام"),
+                aliases = listOf("instagram", "insta", "انسٹاگرام", "इंस्टाग्राम"),
                 packageCandidates = listOf("com.instagram.android", "com.instagram.lite"),
                 primaryStorePackage = "com.instagram.android",
                 officialWebsiteUrl = "https://www.instagram.com"
             ),
             KnownAppDescriptor(
                 canonicalName = "Spotify",
-                aliases = listOf("spotify", "اسپاٹیفائی"),
+                aliases = listOf("spotify", "اسپاٹیفائی", "स्पॉटिफाई"),
                 packageCandidates = listOf("com.spotify.music", "com.spotify.lite"),
                 primaryStorePackage = "com.spotify.music",
                 officialWebsiteUrl = "https://open.spotify.com"
             ),
             KnownAppDescriptor(
                 canonicalName = "Telegram",
-                aliases = listOf("telegram", "ٹیلیگرام"),
+                aliases = listOf("telegram", "ٹیلیگرام", "टेलीग्राम"),
                 packageCandidates = listOf("org.telegram.messenger", "org.telegram.plus"),
                 primaryStorePackage = "org.telegram.messenger",
                 officialWebsiteUrl = "https://web.telegram.org"
@@ -117,29 +128,33 @@ class AppLauncherManager(private val context: Context) {
             ),
             KnownAppDescriptor(
                 canonicalName = "Chrome",
-                aliases = listOf("chrome", "browser", "کروم"),
+                aliases = listOf("chrome", "google chrome", "browser", "کروم", "क्रोम", "ब्राउज़र"),
                 packageCandidates = listOf("com.android.chrome"),
                 primaryStorePackage = "com.android.chrome",
                 officialWebsiteUrl = "https://www.google.com"
             ),
             KnownAppDescriptor(
                 canonicalName = "Maps",
-                aliases = listOf("maps", "google maps", "میپس"),
+                aliases = listOf("maps", "google maps", "میپس", "मैप्स"),
                 packageCandidates = listOf("com.google.android.apps.maps"),
                 primaryStorePackage = "com.google.android.apps.maps",
                 officialWebsiteUrl = "https://maps.google.com"
             ),
             KnownAppDescriptor(
                 canonicalName = "Settings",
-                aliases = listOf("settings", "سیٹنگز"),
+                aliases = listOf("settings", "سیٹنگز", "सेटिंग्स"),
                 packageCandidates = listOf("com.android.settings"),
                 primaryStorePackage = "com.android.settings",
                 officialWebsiteUrl = "https://support.google.com/android"
             ),
             KnownAppDescriptor(
                 canonicalName = "Camera",
-                aliases = listOf("camera", "کیمرہ"),
-                packageCandidates = listOf("com.android.camera2", "com.sec.android.app.camera", "com.google.android.GoogleCamera"),
+                aliases = listOf("camera", "کیمرہ", "कैमरा"),
+                packageCandidates = listOf(
+                    "com.android.camera2",
+                    "com.sec.android.app.camera",
+                    "com.google.android.GoogleCamera"
+                ),
                 primaryStorePackage = "",
                 officialWebsiteUrl = ""
             )
@@ -147,6 +162,7 @@ class AppLauncherManager(private val context: Context) {
 
         fun normalizeAppQuery(raw: String): String {
             return raw.lowercase()
+                .replace(Regex("^(mahi\\s*,?\\s*|ماہی\\s+|माही\\s+)"), "")
                 .replace("open ", "")
                 .replace("launch ", "")
                 .replace("start ", "")
@@ -155,7 +171,13 @@ class AppLauncherManager(private val context: Context) {
                 .replace("karo", "")
                 .replace("کھولو", "")
                 .replace("چلاؤ", "")
-                .replace("app", "")
+                .replace("کرو", "")
+                .replace("खोलो", "")
+                .replace("चलाओ", "")
+                .replace("ओपन", "")
+                .replace("करो", "")
+                .replace(" app", "")
+                .replace("app ", "")
                 .trim()
         }
 
@@ -165,7 +187,7 @@ class AppLauncherManager(private val context: Context) {
             return KNOWN_APPS.firstOrNull { desc ->
                 desc.aliases.any { alias ->
                     cleaned == alias ||
-                        lower.contains(alias) ||
+                        Regex("\\b${Regex.escape(alias)}\\b").containsMatchIn(lower) ||
                         cleaned.contains(alias)
                 } || desc.packageCandidates.any { pkg -> pkg.equals(lower, ignoreCase = true) }
             }
@@ -197,6 +219,52 @@ class AppLauncherManager(private val context: Context) {
 
     fun isAppInstalled(appNameOrPackage: String): Boolean {
         return findInstalledPackage(appNameOrPackage) != null
+    }
+
+    fun verifyAppLaunch(packageName: String): AppLaunchResult {
+        val cleanPkg = packageName.trim()
+        if (cleanPkg.isBlank()) {
+            return AppLaunchResult(
+                success = false,
+                appName = "",
+                status = AppLaunchStatus.NOT_FOUND_OR_FAILED,
+                message = "Package name cannot be blank"
+            )
+        }
+        val pm = context.packageManager
+        val info = inspectPackage(pm, cleanPkg)
+            ?: return AppLaunchResult(
+                success = false,
+                appName = cleanPkg,
+                resolvedPackage = cleanPkg,
+                status = AppLaunchStatus.NOT_FOUND_OR_FAILED,
+                message = "Package $cleanPkg is not installed or visible."
+            )
+        if (!info.isEnabled) {
+            return AppLaunchResult(
+                success = false,
+                appName = info.label,
+                resolvedPackage = info.packageName,
+                status = AppLaunchStatus.APP_DISABLED,
+                message = "${info.label} ($cleanPkg) is installed but disabled."
+            )
+        }
+        val launchIntent = resolveRobustLaunchIntent(pm, cleanPkg)
+            ?: return AppLaunchResult(
+                success = false,
+                appName = info.label,
+                resolvedPackage = info.packageName,
+                status = AppLaunchStatus.NO_LAUNCHABLE_ACTIVITY,
+                message = "${info.label} has no exportable launcher activity."
+            )
+        return AppLaunchResult(
+            success = true,
+            appName = info.label,
+            resolvedPackage = info.packageName,
+            status = AppLaunchStatus.LAUNCHED_NATIVE_APP,
+            message = "${info.label} verified (${info.packageName})",
+            verificationDetail = "Launcher intent resolved via ${launchIntent.component?.className ?: "PackageManager"}"
+        )
     }
 
     fun getInstalledLaunchableApps(searchQuery: String = ""): List<InstalledAppInfo> {
@@ -298,13 +366,32 @@ class AppLauncherManager(private val context: Context) {
             return try {
                 launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
                 context.startActivity(launchIntent)
+                val verification = verifyAppLaunch(installed.packageName)
                 AppLaunchResult(
                     success = true,
                     appName = installed.label,
                     resolvedPackage = installed.packageName,
                     status = AppLaunchStatus.LAUNCHED_NATIVE_APP,
                     message = "Launched ${installed.label}",
-                    verificationDetail = "Verified package ${installed.packageName} via ${launchIntent.component?.className ?: "launch intent"}"
+                    verificationDetail = verification.verificationDetail.ifBlank {
+                        "Verified package ${installed.packageName}"
+                    }
+                )
+            } catch (e: ActivityNotFoundException) {
+                AppLaunchResult(
+                    success = false,
+                    appName = installed.label,
+                    resolvedPackage = installed.packageName,
+                    status = AppLaunchStatus.NO_LAUNCHABLE_ACTIVITY,
+                    message = "Activity not found for ${installed.label}: ${e.localizedMessage}"
+                )
+            } catch (e: SecurityException) {
+                AppLaunchResult(
+                    success = false,
+                    appName = installed.label,
+                    resolvedPackage = installed.packageName,
+                    status = AppLaunchStatus.NOT_FOUND_OR_FAILED,
+                    message = "Permission denied launching ${installed.label}: ${e.localizedMessage}"
                 )
             } catch (e: Exception) {
                 AppLaunchResult(
@@ -327,6 +414,160 @@ class AppLauncherManager(private val context: Context) {
             status = AppLaunchStatus.NOT_FOUND_OR_FAILED,
             message = "$displayLabel is not installed on this device."
         )
+    }
+
+    fun openGoogleApp(): AppLaunchResult {
+        val googleApp = findInstalledPackage("Google")
+        if (googleApp != null && googleApp.isEnabled) {
+            val res = launchApp("Google", openStoreOrWebIfMissing = false)
+            if (res.success) return res
+        }
+        return openWebsite("https://www.google.com", title = "Google")
+    }
+
+    fun openGoogleSearch(query: String): AppLaunchResult {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) return openGoogleApp()
+
+        val encoded = Uri.encode(cleanQuery)
+        val searchUrl = "https://www.google.com/search?q=$encoded"
+        val pm = context.packageManager
+
+        val googlePkg = findInstalledPackage("Google")
+        if (googlePkg != null && googlePkg.isEnabled) {
+            val nativeWebSearch = Intent(Intent.ACTION_WEB_SEARCH).apply {
+                setPackage(googlePkg.packageName)
+                putExtra(SearchManager.QUERY, cleanQuery)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            if (nativeWebSearch.resolveActivity(pm) != null) {
+                try {
+                    context.startActivity(nativeWebSearch)
+                    return AppLaunchResult(
+                        success = true,
+                        appName = "Google Search",
+                        resolvedPackage = googlePkg.packageName,
+                        status = AppLaunchStatus.LAUNCHED_NATIVE_APP,
+                        message = "Searching Google app for '$cleanQuery'",
+                        verificationDetail = "Native ACTION_WEB_SEARCH on ${googlePkg.packageName}",
+                        fallbackUrl = searchUrl
+                    )
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        // Prefer Chrome if installed, otherwise default browser
+        val chromePkg = findInstalledPackage("Chrome")
+        if (chromePkg != null && chromePkg.isEnabled) {
+            val chromeIntent = Intent(Intent.ACTION_VIEW, Uri.parse(searchUrl)).apply {
+                setPackage(chromePkg.packageName)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            if (chromeIntent.resolveActivity(pm) != null) {
+                try {
+                    context.startActivity(chromeIntent)
+                    return AppLaunchResult(
+                        success = true,
+                        appName = "Google Search (Chrome)",
+                        resolvedPackage = chromePkg.packageName,
+                        status = AppLaunchStatus.OPENED_WEB_FALLBACK,
+                        message = "Searching Google in Chrome for '$cleanQuery'",
+                        verificationDetail = "Dispatched $searchUrl via Chrome",
+                        fallbackUrl = searchUrl
+                    )
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(searchUrl)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return if (browserIntent.resolveActivity(pm) != null) {
+            try {
+                context.startActivity(browserIntent)
+                AppLaunchResult(
+                    success = true,
+                    appName = "Google Search",
+                    status = AppLaunchStatus.OPENED_WEB_FALLBACK,
+                    message = "Searching Google for '$cleanQuery'",
+                    verificationDetail = "Opened $searchUrl",
+                    fallbackUrl = searchUrl
+                )
+            } catch (e: Exception) {
+                AppLaunchResult(
+                    success = false,
+                    appName = "Google Search",
+                    status = AppLaunchStatus.NOT_FOUND_OR_FAILED,
+                    message = "Failed to open Google search: ${e.localizedMessage}",
+                    fallbackUrl = searchUrl
+                )
+            }
+        } else {
+            AppLaunchResult(
+                success = false,
+                appName = "Google Search",
+                status = AppLaunchStatus.NOT_FOUND_OR_FAILED,
+                message = "No browser or Google app available to open '$searchUrl'",
+                fallbackUrl = searchUrl
+            )
+        }
+    }
+
+    fun openWebsite(rawUrl: String, title: String? = null): AppLaunchResult {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isBlank()) {
+            return AppLaunchResult(
+                success = false,
+                appName = title ?: "Website",
+                status = AppLaunchStatus.NOT_FOUND_OR_FAILED,
+                message = "Website URL cannot be blank"
+            )
+        }
+        val lower = trimmed.lowercase()
+        if (lower.startsWith("javascript:") || lower.startsWith("file:") || lower.startsWith("content:")) {
+            return AppLaunchResult(
+                success = false,
+                appName = title ?: "Website",
+                status = AppLaunchStatus.NOT_FOUND_OR_FAILED,
+                message = "Blocked unsupported URL scheme for security"
+            )
+        }
+        val normalizedUrl = if (lower.startsWith("http://") || lower.startsWith("https://")) {
+            trimmed
+        } else {
+            "https://$trimmed"
+        }
+
+        val pm = context.packageManager
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(normalizedUrl)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (intent.resolveActivity(pm) == null) {
+            return AppLaunchResult(
+                success = false,
+                appName = title ?: normalizedUrl,
+                status = AppLaunchStatus.NOT_FOUND_OR_FAILED,
+                message = "No browser installed to open $normalizedUrl",
+                fallbackUrl = normalizedUrl
+            )
+        }
+        return try {
+            context.startActivity(intent)
+            AppLaunchResult(
+                success = true,
+                appName = title ?: normalizedUrl,
+                status = AppLaunchStatus.OPENED_WEB_FALLBACK,
+                message = "Opened $normalizedUrl",
+                verificationDetail = "Dispatched VIEW $normalizedUrl",
+                fallbackUrl = normalizedUrl
+            )
+        } catch (e: Exception) {
+            AppLaunchResult(
+                success = false,
+                appName = title ?: normalizedUrl,
+                status = AppLaunchStatus.NOT_FOUND_OR_FAILED,
+                message = "Failed to open website: ${e.localizedMessage}",
+                fallbackUrl = normalizedUrl
+            )
+        }
     }
 
     fun openYouTubeSearch(query: String): AppLaunchResult {
@@ -377,7 +618,6 @@ class AppLauncherManager(private val context: Context) {
                 fallbackUrl = searchUrl
             )
         } catch (e: Exception) {
-            // Final browser attempt without package lock
             try {
                 context.startActivity(
                     Intent(Intent.ACTION_VIEW, Uri.parse(searchUrl)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -418,7 +658,6 @@ class AppLauncherManager(private val context: Context) {
                     fallbackUrl = "https://play.google.com/store/apps/details?id=${known.primaryStorePackage}"
                 )
             } catch (_: ActivityNotFoundException) {
-                // Play Store unavailable (e.g., emulator without Play Store) -> try official website
             } catch (_: Exception) {
             }
         }
@@ -458,17 +697,23 @@ class AppLauncherManager(private val context: Context) {
     private fun resolveRobustLaunchIntent(pm: PackageManager, packageName: String): Intent? {
         pm.getLaunchIntentForPackage(packageName)?.let { return it }
 
-        // Fallback if app update moved main launcher activity or category differs (LEANBACK/LAUNCHER)
         val mainQuery = Intent(Intent.ACTION_MAIN).apply {
             addCategory(Intent.CATEGORY_LAUNCHER)
             setPackage(packageName)
         }
         val activities = try {
-            pm.queryIntentActivities(mainQuery, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.queryIntentActivities(mainQuery, PackageManager.ResolveInfoFlags.of(0))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.queryIntentActivities(mainQuery, 0)
+            }
         } catch (_: Exception) {
             emptyList()
         }
-        val firstMatch = activities.firstOrNull { it.activityInfo?.enabled == true }?.activityInfo ?: return null
+        val firstMatch = activities.firstOrNull { it.activityInfo?.enabled == true && it.activityInfo?.exported == true }?.activityInfo
+            ?: activities.firstOrNull { it.activityInfo?.enabled == true }?.activityInfo
+            ?: return null
         return Intent(Intent.ACTION_MAIN).apply {
             addCategory(Intent.CATEGORY_LAUNCHER)
             component = ComponentName(firstMatch.packageName, firstMatch.name)

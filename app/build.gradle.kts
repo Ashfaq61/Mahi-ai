@@ -91,6 +91,7 @@ dependencies {
   implementation(libs.androidx.camera.core)
   implementation(libs.androidx.camera.lifecycle)
   implementation(libs.androidx.camera.view)
+  implementation(libs.androidx.camera.video)
   implementation(libs.mlkit.text.recognition)
   implementation(libs.mlkit.image.labeling)
   implementation(libs.androidx.compose.material.icons.core)

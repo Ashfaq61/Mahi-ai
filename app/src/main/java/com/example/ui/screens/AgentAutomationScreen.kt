@@ -309,7 +309,7 @@ fun AgentAutomationScreen(
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                listOf("TikTok", "Facebook", "YouTube", "WhatsApp").forEach { appName ->
+                listOf("TikTok", "Facebook", "YouTube", "Google", "Chrome", "WhatsApp").forEach { appName ->
                     Button(
                         onClick = {
                             onLaunchApp(appName)

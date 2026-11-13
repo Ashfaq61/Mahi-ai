@@ -39,6 +39,33 @@ class DeviceControlHelper(private val context: Context) {
         )
     }
 
+    fun openGoogleApp(): AutomationOutcome {
+        val result = appLauncher.openGoogleApp()
+        return AutomationOutcome(
+            success = result.success,
+            message = result.message,
+            verificationDetail = result.verificationDetail
+        )
+    }
+
+    fun googleSearch(query: String): AutomationOutcome {
+        val result = appLauncher.openGoogleSearch(query)
+        return AutomationOutcome(
+            success = result.success,
+            message = result.message,
+            verificationDetail = result.verificationDetail
+        )
+    }
+
+    fun openWebsite(url: String): AutomationOutcome {
+        val result = appLauncher.openWebsite(url)
+        return AutomationOutcome(
+            success = result.success,
+            message = result.message,
+            verificationDetail = result.verificationDetail
+        )
+    }
+
     fun getMediaVolumePercent(): Int {
         val am = audioManager ?: return 50
         val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)

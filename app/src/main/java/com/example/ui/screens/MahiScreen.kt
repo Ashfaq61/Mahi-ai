@@ -75,7 +75,9 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.api.ConnectionStatus
+import com.example.camera.CameraLensFacing
 import com.example.ui.components.ActionExecutionCard
+import com.example.ui.components.HomeQuickControlsBar
 import com.example.ui.components.LiveWaveformVisualizer
 import com.example.ui.components.MahiOrb
 import com.example.ui.components.MahiStatusBanner
@@ -139,6 +141,7 @@ fun MahiScreen(
     val callFeedback by viewModel.callFeedback.collectAsStateWithLifecycle()
     val requestedTab by viewModel.requestedTab.collectAsStateWithLifecycle()
     val pendingDialNumber by viewModel.pendingDialNumber.collectAsStateWithLifecycle()
+    val cameraState by viewModel.cameraState.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val colors = MaterialTheme.colorScheme
@@ -163,15 +166,36 @@ fun MahiScreen(
     }
 
     var selectedTab by remember { mutableStateOf(MahiHomeTab.VOICE) }
+    var isCameraStudioMode by remember { mutableStateOf(false) }
     var showSettingsModal by remember { mutableStateOf(false) }
     var showApiSettingsScreen by remember { mutableStateOf(false) }
     var showTextInput by remember { mutableStateOf(false) }
     var typedQuery by remember { mutableStateOf("") }
 
     LaunchedEffect(requestedTab) {
-        if (requestedTab == "CALLS") {
-            selectedTab = MahiHomeTab.CALLS
-            viewModel.consumeRequestedTab()
+        when (requestedTab) {
+            "CALLS" -> {
+                selectedTab = MahiHomeTab.CALLS
+                viewModel.consumeRequestedTab()
+            }
+            "AGENT" -> {
+                selectedTab = MahiHomeTab.AGENT
+                viewModel.consumeRequestedTab()
+            }
+            "RESEARCH" -> {
+                selectedTab = MahiHomeTab.RESEARCH
+                viewModel.consumeRequestedTab()
+            }
+            "LENS" -> {
+                selectedTab = MahiHomeTab.LENS
+                isCameraStudioMode = false
+                viewModel.consumeRequestedTab()
+            }
+            "CAMERA_STUDIO" -> {
+                selectedTab = MahiHomeTab.LENS
+                isCameraStudioMode = true
+                viewModel.consumeRequestedTab()
+            }
         }
     }
 
@@ -365,7 +389,29 @@ fun MahiScreen(
                                 )
                             }
 
-                            Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            HomeQuickControlsBar(
+                                onOpenFacebook = { viewModel.launchAppDirect("Facebook") },
+                                onOpenTikTok = { viewModel.launchAppDirect("TikTok") },
+                                onOpenYouTube = { viewModel.launchAppDirect("YouTube") },
+                                onOpenGoogle = { viewModel.openGoogleAppDirect() },
+                                onOpenCamera = {
+                                    isCameraStudioMode = true
+                                    viewModel.openCameraMode(CameraLensFacing.BACK)
+                                },
+                                onTakeSelfie = {
+                                    isCameraStudioMode = true
+                                    viewModel.capturePhotoOrSelfie(isSelfie = true)
+                                },
+                                onStartVideo = {
+                                    isCameraStudioMode = true
+                                    viewModel.toggleVideoRecording()
+                                },
+                                onOpenChrome = { viewModel.launchAppDirect("Chrome") }
+                            )
+
+                            Spacer(modifier = Modifier.height(6.dp))
 
                             ActionExecutionCard(
                                 result = uiState.lastExecutedTool,
@@ -698,19 +744,83 @@ fun MahiScreen(
                 }
 
                 MahiHomeTab.LENS -> {
-                    NeuralLensScreen(
-                        analyzer = viewModel.neuralLensAnalyzer,
-                        liveSnapshot = liveSnapshot,
-                        selectedLanguage = userPrefs.language,
-                        aiVisionAnswer = visionAnswer,
-                        isAnalyzingAi = isVisionLoading,
-                        visionError = visionError,
-                        onLanguageSelected = { viewModel.setLanguage(it) },
-                        onAskAiVision = { viewModel.askVisionQuestion(it) },
-                        onAnalyzePhotoUri = { viewModel.analyzeVisionPhotoUri(it) },
-                        onSpeakAnswer = { viewModel.speakText(it) },
-                        onOpenApiSettings = { showApiSettingsScreen = true }
-                    )
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(colors.surfaceVariant)
+                                .padding(4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (!isCameraStudioMode) NeonMagenta else Color.Transparent)
+                                    .clickable { isCameraStudioMode = false }
+                                    .padding(vertical = 8.dp)
+                                    .testTag("lens_mode_neural"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "Neural Lens",
+                                    color = if (!isCameraStudioMode) Color.White else colors.onSurfaceVariant,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (isCameraStudioMode) NeonViolet else Color.Transparent)
+                                    .clickable { isCameraStudioMode = true }
+                                    .padding(vertical = 8.dp)
+                                    .testTag("lens_mode_camera"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "Camera Studio",
+                                    color = if (isCameraStudioMode) Color.White else colors.onSurfaceVariant,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        if (isCameraStudioMode) {
+                            CameraStudioScreen(
+                                cameraController = viewModel.cameraController,
+                                cameraState = cameraState,
+                                onSwitchLens = { viewModel.switchCameraLens(it) },
+                                onCapturePhoto = { viewModel.capturePhotoOrSelfie(isSelfie = false) },
+                                onCaptureSelfie = { viewModel.capturePhotoOrSelfie(isSelfie = true) },
+                                onToggleVideoRecording = { viewModel.toggleVideoRecording() },
+                                onToggleFlash = { viewModel.toggleCameraFlash() },
+                                onZoomIn = { viewModel.adjustCameraZoom(0.5f) },
+                                onZoomOut = { viewModel.adjustCameraZoom(-0.5f) },
+                                onSystemCameraFallback = { viewModel.launchSystemCameraFallback(it) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        } else {
+                            NeuralLensScreen(
+                                analyzer = viewModel.neuralLensAnalyzer,
+                                liveSnapshot = liveSnapshot,
+                                selectedLanguage = userPrefs.language,
+                                aiVisionAnswer = visionAnswer,
+                                isAnalyzingAi = isVisionLoading,
+                                visionError = visionError,
+                                onLanguageSelected = { viewModel.setLanguage(it) },
+                                onAskAiVision = { viewModel.askVisionQuestion(it) },
+                                onAnalyzePhotoUri = { viewModel.analyzeVisionPhotoUri(it) },
+                                onSpeakAnswer = { viewModel.speakText(it) },
+                                onOpenApiSettings = { showApiSettingsScreen = true },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
                 }
 
                 MahiHomeTab.RESEARCH -> {

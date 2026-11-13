@@ -1,5 +1,6 @@
 package com.example.automation
 
+import com.example.camera.CameraLensFacing
 import com.example.preferences.AppLanguage
 
 sealed class RoutedVoiceCommand {
@@ -10,7 +11,18 @@ sealed class RoutedVoiceCommand {
         val followUpGesture: VoiceGestureIntent? = null
     ) : RoutedVoiceCommand()
 
+    object OpenGoogle : RoutedVoiceCommand()
+    data class GoogleSearch(val query: String, val summarizeInLanguage: Boolean = false) : RoutedVoiceCommand()
     data class SearchYouTube(val query: String) : RoutedVoiceCommand()
+    data class OpenWebsite(val url: String) : RoutedVoiceCommand()
+
+    data class OpenCamera(val lens: CameraLensFacing = CameraLensFacing.BACK) : RoutedVoiceCommand()
+    data class SwitchCamera(val lens: CameraLensFacing) : RoutedVoiceCommand()
+    data class CapturePhoto(val isSelfie: Boolean = false) : RoutedVoiceCommand()
+    object StartVideoRecording : RoutedVoiceCommand()
+    object StopVideoRecording : RoutedVoiceCommand()
+    data class SetCameraFlash(val enabled: Boolean) : RoutedVoiceCommand()
+    data class SetCameraZoom(val deltaStep: Float) : RoutedVoiceCommand()
 
     data class ExecuteGesture(val gesture: VoiceGestureIntent) : RoutedVoiceCommand()
 
@@ -18,6 +30,27 @@ sealed class RoutedVoiceCommand {
     object AnswerActiveCall : RoutedVoiceCommand()
     object RejectActiveCall : RoutedVoiceCommand()
     object EndActiveCall : RoutedVoiceCommand()
+
+    fun deduplicationKey(): String = when (this) {
+        StopEverything -> "STOP"
+        is LaunchApp -> "LAUNCH:${appName.lowercase()}:${followUpGesture?.actionName.orEmpty()}"
+        OpenGoogle -> "OPEN_GOOGLE"
+        is GoogleSearch -> "GOOGLE_SEARCH:${query.lowercase()}"
+        is SearchYouTube -> "YT_SEARCH:${query.lowercase()}"
+        is OpenWebsite -> "OPEN_SITE:${url.lowercase()}"
+        is OpenCamera -> "OPEN_CAM:${lens.name}"
+        is SwitchCamera -> "SWITCH_CAM:${lens.name}"
+        is CapturePhoto -> "CAPTURE_PHOTO:$isSelfie"
+        StartVideoRecording -> "START_VIDEO"
+        StopVideoRecording -> "STOP_VIDEO"
+        is SetCameraFlash -> "SET_FLASH:$enabled"
+        is SetCameraZoom -> "SET_ZOOM:$deltaStep"
+        is ExecuteGesture -> "GESTURE:${gesture.actionName}:${gesture.targetText}"
+        is PlaceCall -> "CALL:${target.lowercase()}"
+        AnswerActiveCall -> "ANSWER_CALL"
+        RejectActiveCall -> "REJECT_CALL"
+        EndActiveCall -> "END_CALL"
+    }
 }
 
 data class VoiceGestureIntent(
@@ -34,7 +67,41 @@ enum class GestureSpeed(val durationMs: Long, val displayName: String) {
 }
 
 /**
- * Deterministic Urdu / Roman Urdu / English voice command router + language detector.
+ * Prevents duplicate rapid executions across streaming speech transcripts,
+ * Gemini Live tool calls, and repeat triggers within a cooldown window.
+ */
+class CommandExecutionGuard(
+    private val dedupWindowMs: Long = 2_500L,
+    private val clockMs: () -> Long = { System.currentTimeMillis() }
+) {
+    private var lastSignature: String? = null
+    private var lastExecutedAtMs: Long = 0L
+
+    @Synchronized
+    fun shouldExecute(signature: String): Boolean {
+        if (signature == "STOP" || signature == "STOP_VIDEO") {
+            lastSignature = signature
+            lastExecutedAtMs = clockMs()
+            return true
+        }
+        val now = clockMs()
+        if (lastSignature == signature && (now - lastExecutedAtMs) < dedupWindowMs) {
+            return false
+        }
+        lastSignature = signature
+        lastExecutedAtMs = now
+        return true
+    }
+
+    @Synchronized
+    fun reset() {
+        lastSignature = null
+        lastExecutedAtMs = 0L
+    }
+}
+
+/**
+ * Deterministic Urdu / Roman Urdu / Hindi / English voice command router + language detector.
  */
 object VoiceCommandRouter {
 
@@ -42,41 +109,67 @@ object VoiceCommandRouter {
         "kholo", "chalao", "karo", "upar", "neeche", "niche", "ruko", "ruk", "jao",
         "band", "bhai", "yaar", "kya", "hai", "haan", "nahi", "batao", "dikhao",
         "iska", "is", "page", "ke", "end", "tak", "yeh", "button", "par", "pe",
-        "search", "mera", "mujhe", "kaun", "aap", "tum", "theek", "shukriya", "call"
+        "search", "mera", "mujhe", "kaun", "aap", "tum", "theek", "shukriya", "call",
+        "dhoondo", "khaincho", "lo", "mein"
     )
 
     fun detectLanguageFromUtterance(text: String, fallback: AppLanguage): AppLanguage {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return fallback
 
-        // Urdu Arabic script block check (\u0600-\u06FF)
         if (trimmed.any { it in '\u0600'..'\u06FF' }) {
             return AppLanguage.URDU
         }
 
         val words = trimmed.lowercase().split(Regex("[^a-z]+")).filter { it.isNotBlank() }
         val romanHits = words.count { it in romanUrduTokens }
-        if (romanHits >= 2 || (words.size <= 3 && romanHits >= 1 && words.any { it in setOf("kholo", "chalao", "karo", "upar", "neeche", "ruko", "ruk", "jao") })) {
+        if (romanHits >= 2 || (words.size <= 3 && romanHits >= 1 && words.any {
+                it in setOf("kholo", "chalao", "karo", "upar", "neeche", "ruko", "ruk", "jao", "dhoondo", "khaincho")
+            })
+        ) {
             return AppLanguage.ROMAN_URDU
         }
 
         return if (words.size >= 4 && romanHits == 0) AppLanguage.ENGLISH else fallback
     }
 
+    /**
+     * Checks whether a streaming partial transcript is already safe to evaluate after debounce
+     * vs clearly incomplete trailing connector ("open", "mahi", "google par").
+     */
+    fun isLikelyIncompletePartial(rawInput: String): Boolean {
+        val lower = rawInput.trim().lowercase()
+        if (lower.isEmpty()) return true
+        val incompleteEndings = setOf(
+            "mahi", "open", "launch", "start", "kholo", "chalao", "search",
+            "google par", "youtube par", "chrome mein", "call", "and", "aur"
+        )
+        return incompleteEndings.contains(lower)
+    }
+
     fun parseCommand(rawInput: String): RoutedVoiceCommand? {
         val clean = rawInput.trim()
         if (clean.isEmpty()) return null
         val cleanNoWake = clean
-            .replace(Regex("^(mahi\\s*,?\\s*|ماہی\\s+)", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("^(mahi\\s*,?\\s*|ماہی\\s+|माही\\s+)", RegexOption.IGNORE_CASE), "")
             .trim()
             .removeSuffix(".")
+            .removeSuffix("।")
             .trim()
         val lower = cleanNoWake.lowercase()
+        if (lower.isEmpty()) return null
 
-        // 1. Immediate STOP / Ruk jao
+        // 1. Specific Video Recording Stop vs Immediate STOP
+        if (lower.contains("video band") || lower.contains("recording stop") ||
+            lower.contains("stop recording") || lower.contains("stop video") ||
+            clean.contains("ویڈیو بند") || clean.contains("ریکارڈنگ بند") || clean.contains("वीडियो बंद")
+        ) {
+            return RoutedVoiceCommand.StopVideoRecording
+        }
+
         if (lower == "stop" || lower == "stop scrolling" || lower == "ruk jao" || lower == "ruko" ||
             lower == "bas" || lower.contains("ruk jao") || lower.contains("stop gesture") ||
-            clean.contains("رک جاؤ") || clean.contains("بند کرو")
+            clean.contains("رک جاؤ") || clean.contains("بند کرو") || clean.contains("रुक जाओ")
         ) {
             return RoutedVoiceCommand.StopEverything
         }
@@ -106,28 +199,50 @@ object VoiceCommandRouter {
             if (target.isNotBlank()) return RoutedVoiceCommand.PlaceCall(target)
         }
 
-        // 3. Compound YouTube search (English / Roman Urdu / Urdu)
-        if ((lower.contains("youtube") || clean.contains("یوٹیوب")) &&
-            (lower.contains("search") || lower.contains("par ") || lower.contains("pe ") || lower.contains("play ") || clean.contains("سرچ"))
+        // 3. Camera Voice Controls (explicit phrases only — never guess)
+        parseCameraCommand(cleanNoWake, lower)?.let { return it }
+
+        // 4. YouTube Search (English / Roman Urdu / Urdu / Hindi)
+        if ((lower.contains("youtube") || clean.contains("یوٹیوب") || clean.contains("यूट्यूब")) &&
+            (lower.contains("search") || lower.contains("par ") || lower.contains("pe ") ||
+                lower.contains("dhoondo") || lower.contains("play ") || clean.contains("سرچ") || clean.contains("सर्च"))
         ) {
-            val extractedQuery = lower
-                .replace("youtube", "")
-                .replace("par", "")
-                .replace("pe", "")
-                .replace("search", "")
-                .replace("karo", "")
-                .replace("for", "")
-                .replace("on", "")
+            val extractedQuery = cleanNoWake
+                .replace(Regex("\\byoutube\\b", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("\\b(par|pe|search|karo|dhoondo|for|on|mein|main|me)\\b", RegexOption.IGNORE_CASE), " ")
+                .replace("یوٹیوب", "")
+                .replace("سرچ", "")
+                .replace("کرو", "")
+                .replace("यूट्यूब", "")
+                .replace("सर्च", "")
+                .replace("पर", "")
+                .replace(Regex("\\s+"), " ")
                 .trim()
             if (extractedQuery.isNotBlank() && !lower.contains("chalao") && !lower.contains("open") && !lower.contains("kholo")) {
                 return RoutedVoiceCommand.SearchYouTube(extractedQuery)
             }
         }
 
-        // 4. App Launch + optional follow-up gesture (e.g. "Open Facebook and scroll down")
-        val launchKeywords = listOf("open ", "launch ", "start ", "kholo", "chalao", "open karo", "کھولو", "چلاؤ")
+        // 5. Open Website (e.g., "Chrome mein wikipedia.org kholo", "open website https://openai.com")
+        parseOpenWebsite(cleanNoWake, lower)?.let { return it }
+
+        // 6. Google Search & Internet Search (kept cleanly distinct from YouTube Search!)
+        parseGoogleSearch(cleanNoWake, lower)?.let { return it }
+
+        // 7. Google App Launch ("Google kholo", "Open Google")
+        if ((lower == "google kholo" || lower == "open google" || lower == "google open karo" ||
+                lower == "launch google" || cleanNoWake == "گوگل کھولو" || cleanNoWake == "गूगल खोलो")
+        ) {
+            return RoutedVoiceCommand.OpenGoogle
+        }
+
+        // 8. App Launch + optional follow-up gesture
+        val launchKeywords = listOf(
+            "open ", "launch ", "start ", "kholo", "chalao", "open karo",
+            "کھولو", "چلاؤ", "खोलो", "चलाओ"
+        )
         if (launchKeywords.any { lower.contains(it) }) {
-            val matchedApp = AppLauncherManager.matchKnownApp(clean)
+            val matchedApp = AppLauncherManager.matchKnownApp(cleanNoWake)
             val followUp = when {
                 lower.contains("scroll down") || lower.contains("neeche") ->
                     VoiceGestureIntent("SWIPE_DOWN_SCROLL", speed = GestureSpeed.NORMAL)
@@ -137,21 +252,121 @@ object VoiceCommandRouter {
             }
 
             if (matchedApp != null) {
+                if (matchedApp.canonicalName == "Google") {
+                    return RoutedVoiceCommand.OpenGoogle
+                }
+                if (matchedApp.canonicalName == "Camera") {
+                    val lens = if (lower.contains("front") || lower.contains("selfie")) {
+                        CameraLensFacing.FRONT
+                    } else {
+                        CameraLensFacing.BACK
+                    }
+                    return RoutedVoiceCommand.OpenCamera(lens)
+                }
                 return RoutedVoiceCommand.LaunchApp(matchedApp.canonicalName, followUp)
             }
 
             val stripped = AppLauncherManager.normalizeAppQuery(
-                lower.substringBefore(" and ").substringBefore(" aur ")
+                cleanNoWake.substringBefore(" and ").substringBefore(" aur ")
             )
             if (stripped.isNotBlank() && !lower.contains("button") && !lower.contains("screen")) {
                 return RoutedVoiceCommand.LaunchApp(stripped, followUp)
             }
         }
 
-        // 5. Screen Gesture Engine commands (English, Roman Urdu, Urdu)
+        // 9. Screen Gesture Engine commands (English, Roman Urdu, Urdu)
         parseGesture(clean, lower)?.let { return RoutedVoiceCommand.ExecuteGesture(it) }
 
         return null
+    }
+
+    private fun parseCameraCommand(cleanNoWake: String, lower: String): RoutedVoiceCommand? {
+        return when {
+            lower.contains("selfie") || cleanNoWake.contains("سیلفی") || cleanNoWake.contains("सेल्फी") -> {
+                if (lower.contains("camera") && (lower.contains("kholo") || lower.contains("open"))) {
+                    RoutedVoiceCommand.OpenCamera(CameraLensFacing.FRONT)
+                } else {
+                    RoutedVoiceCommand.CapturePhoto(isSelfie = true)
+                }
+            }
+            lower.contains("front camera") && (lower.contains("kholo") || lower.contains("open")) ->
+                RoutedVoiceCommand.OpenCamera(CameraLensFacing.FRONT)
+            lower.contains("back camera") && (lower.contains("kholo") || lower.contains("open")) ->
+                RoutedVoiceCommand.OpenCamera(CameraLensFacing.BACK)
+            lower.contains("camera back karo") || lower.contains("switch to back camera") || lower.contains("back camera lagao") ->
+                RoutedVoiceCommand.SwitchCamera(CameraLensFacing.BACK)
+            lower.contains("camera front karo") || lower.contains("switch to front camera") || lower.contains("front camera lagao") ->
+                RoutedVoiceCommand.SwitchCamera(CameraLensFacing.FRONT)
+            lower.contains("video record") || lower.contains("record video") ||
+                lower.contains("video banao") || cleanNoWake.contains("ویڈیو ریکارڈ") || cleanNoWake.contains("वीडियो रिकॉर्ड") ->
+                RoutedVoiceCommand.StartVideoRecording
+            lower.contains("photo lo") || lower.contains("picture khaincho") || lower.contains("photo khaincho") ||
+                lower.contains("take a photo") || lower.contains("take photo") || lower.contains("click photo") ||
+                cleanNoWake.contains("فوٹو لو") || cleanNoWake.contains("تصویر کھینچو") || cleanNoWake.contains("फोटो लो") ->
+                RoutedVoiceCommand.CapturePhoto(isSelfie = false)
+            lower.contains("flash on") || cleanNoWake.contains("فلیش آن") || cleanNoWake.contains("फ्लैश ऑन") ->
+                RoutedVoiceCommand.SetCameraFlash(enabled = true)
+            lower.contains("flash off") || cleanNoWake.contains("فلیش آف") || cleanNoWake.contains("फ्लैश ऑफ") ->
+                RoutedVoiceCommand.SetCameraFlash(enabled = false)
+            lower.contains("zoom in") || cleanNoWake.contains("زوم ان") ->
+                RoutedVoiceCommand.SetCameraZoom(deltaStep = 0.5f)
+            lower.contains("zoom out") || cleanNoWake.contains("زوم آؤٹ") ->
+                RoutedVoiceCommand.SetCameraZoom(deltaStep = -0.5f)
+            (lower == "camera" || lower == "camera kholo" || lower == "open camera" || lower == "camera open karo" ||
+                cleanNoWake == "کیمرہ کھولو" || cleanNoWake == "कैमरा खोलो") ->
+                RoutedVoiceCommand.OpenCamera(CameraLensFacing.BACK)
+            else -> null
+        }
+    }
+
+    private fun parseGoogleSearch(cleanNoWake: String, lower: String): RoutedVoiceCommand.GoogleSearch? {
+        val isGoogleOrInternetSearch =
+            ((lower.contains("google") || lower.contains("internet") || cleanNoWake.contains("گوگل") || cleanNoWake.contains("انٹرنیٹ") || cleanNoWake.contains("गूगल")) &&
+                (lower.contains("search") || lower.contains("dhoondo") || lower.contains("dhundo") || lower.contains("par ") ||
+                    lower.contains("pe ") || lower.contains("find") || cleanNoWake.contains("سرچ") || cleanNoWake.contains("ڈھونڈو") || cleanNoWake.contains("सर्च"))) ||
+                lower.startsWith("search google ")
+
+        if (!isGoogleOrInternetSearch) return null
+        if (lower == "google kholo" || lower == "open google" || lower == "google open karo") return null
+
+        val extracted = cleanNoWake
+            .replace(Regex("\\b(google|internet|par|pe|search|dhoondo|dhundo|karo|find|for|on|mein|me|main|latest\\s+(?=$))\\b", RegexOption.IGNORE_CASE), " ")
+            .replace("گوگل", "")
+            .replace("انٹرنیٹ", "")
+            .replace("پر", "")
+            .replace("سرچ", "")
+            .replace("ڈھونڈو", "")
+            .replace("کرو", "")
+            .replace("गूगल", "")
+            .replace("इंटरनेट", "")
+            .replace("पर", "")
+            .replace("सर्च", "")
+            .replace("करो", "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+        if (extracted.isBlank()) return null
+        val wantSummary = lower.contains("summarize") || lower.contains("urdu") || lower.contains("batao")
+        return RoutedVoiceCommand.GoogleSearch(query = extracted, summarizeInLanguage = wantSummary)
+    }
+
+    private fun parseOpenWebsite(cleanNoWake: String, lower: String): RoutedVoiceCommand.OpenWebsite? {
+        val urlRegex = Regex("(https?://[^\\s]+|[a-zA-Z0-9-]+\\.(com|org|net|io|ai|edu|pk|in|co)(/[^\\s]*)?)", RegexOption.IGNORE_CASE)
+        val hasWebsiteCue = lower.contains("website") || lower.contains("chrome mein") ||
+            lower.contains("chrome me") || lower.contains("open http") || urlRegex.containsMatchIn(cleanNoWake)
+
+        if (!hasWebsiteCue) return null
+        // Exclude bare app launches like "open youtube" without a domain suffix
+        val domainMatch = urlRegex.find(cleanNoWake) ?: return null
+        val candidateUrl = domainMatch.value.trim().trimEnd('.', ',', '!', '?')
+        if (candidateUrl.isBlank()) return null
+
+        val normalized = if (candidateUrl.startsWith("http://", true) || candidateUrl.startsWith("https://", true)) {
+            candidateUrl
+        } else {
+            "https://$candidateUrl"
+        }
+        return RoutedVoiceCommand.OpenWebsite(normalized)
     }
 
     private fun parseGesture(clean: String, lower: String): VoiceGestureIntent? {

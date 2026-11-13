@@ -7,6 +7,11 @@ import android.net.Uri
 import android.provider.AlarmClock
 import android.util.Log
 import com.example.automation.AppLauncherManager
+import com.example.automation.AutonomousAgentEngine
+import com.example.automation.MahiAccessibilityService
+import com.example.automation.VoiceGestureIntent
+import com.example.camera.CameraLensFacing
+import com.example.camera.MahiCameraController
 
 data class ToolAction(
     val name: String,
@@ -22,7 +27,13 @@ data class ToolExecutionResult(
     val isSuccess: Boolean = true
 )
 
-class MahiToolsManager(private val context: Context) {
+class MahiToolsManager(
+    private val context: Context,
+    private val cameraController: MahiCameraController? = null,
+    private val onNavigateToCamera: (() -> Unit)? = null,
+    private val onRunAiSearchSummary: ((String) -> Unit)? = null,
+    private val hasAudioPermission: () -> Boolean = { false }
+) {
     companion object {
         private const val TAG = "MahiTools"
     }
@@ -30,13 +41,12 @@ class MahiToolsManager(private val context: Context) {
     private val cameraManager by lazy {
         try {
             context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         }
     }
 
     private var isTorchOn: Boolean = false
-
     private val appLauncher by lazy { AppLauncherManager(context) }
 
     fun execute(action: ToolAction): ToolExecutionResult {
@@ -44,6 +54,21 @@ class MahiToolsManager(private val context: Context) {
             when (action.name.lowercase().trim()) {
                 "openapp" -> {
                     val target = action.params["appName"] ?: action.params["title"] ?: action.params["url"] ?: ""
+                    if (target.equals("google", ignoreCase = true)) {
+                        val res = appLauncher.openGoogleApp()
+                        return ToolExecutionResult(
+                            actionName = "openGoogle",
+                            displayTitle = res.appName,
+                            message = res.message,
+                            linkUrl = res.fallbackUrl,
+                            isSuccess = res.success
+                        )
+                    }
+                    if (target.equals("camera", ignoreCase = true) && cameraController != null) {
+                        val msg = cameraController.prepareOpenCamera(CameraLensFacing.BACK)
+                        onNavigateToCamera?.invoke()
+                        return ToolExecutionResult("openCamera", "Camera Studio", msg, isSuccess = true)
+                    }
                     val launchRes = appLauncher.launchApp(target, openStoreOrWebIfMissing = true)
                     ToolExecutionResult(
                         actionName = "openApp",
@@ -54,9 +79,147 @@ class MahiToolsManager(private val context: Context) {
                     )
                 }
 
+                "opencamera" -> {
+                    val lensArg = (action.params["frontOrBack"] ?: action.params["lens"] ?: "back").lowercase()
+                    val lens = if (lensArg.contains("front") || lensArg.contains("selfie")) {
+                        CameraLensFacing.FRONT
+                    } else {
+                        CameraLensFacing.BACK
+                    }
+                    if (cameraController != null) {
+                        val msg = cameraController.prepareOpenCamera(lens)
+                        onNavigateToCamera?.invoke()
+                        ToolExecutionResult("openCamera", "Camera (${lens.name})", msg, isSuccess = true)
+                    } else {
+                        val ok = appLauncher.launchApp("Camera", openStoreOrWebIfMissing = false)
+                        ToolExecutionResult("openCamera", "Camera", ok.message, isSuccess = ok.success)
+                    }
+                }
+
+                "switchcamera" -> {
+                    val lensArg = (action.params["frontOrBack"] ?: action.params["lens"] ?: "front").lowercase()
+                    val lens = if (lensArg.contains("back") || lensArg.contains("rear")) {
+                        CameraLensFacing.BACK
+                    } else {
+                        CameraLensFacing.FRONT
+                    }
+                    val msg = cameraController?.requestSwitchCamera(lens) ?: "Camera controller unavailable"
+                    onNavigateToCamera?.invoke()
+                    ToolExecutionResult("switchCamera", "Switch Camera (${lens.name})", msg, isSuccess = cameraController != null)
+                }
+
+                "capturephoto" -> {
+                    val isSelfie = action.params["isSelfie"]?.lowercase() == "true"
+                    val msg = cameraController?.requestPhotoOrSelfie(isSelfie = isSelfie, countdownSeconds = if (isSelfie) 3 else 0)
+                        ?: "Camera controller unavailable"
+                    onNavigateToCamera?.invoke()
+                    ToolExecutionResult(
+                        actionName = "capturePhoto",
+                        displayTitle = if (isSelfie) "Selfie Countdown" else "Capture Photo",
+                        message = msg,
+                        isSuccess = cameraController != null
+                    )
+                }
+
+                "startvideorecording" -> {
+                    val msg = cameraController?.requestStartVideoRecording(hasAudioPermission())
+                        ?: "Camera controller unavailable"
+                    onNavigateToCamera?.invoke()
+                    ToolExecutionResult("startVideoRecording", "Video Recording", msg, isSuccess = cameraController != null)
+                }
+
+                "stopvideorecording" -> {
+                    val msg = cameraController?.stopVideoRecording() ?: "No active recording"
+                    ToolExecutionResult("stopVideoRecording", "Video Saved", msg, isSuccess = true)
+                }
+
+                "setflash" -> {
+                    val enabled = action.params["enabled"]?.lowercase() in setOf("true", "on", "1", "yes")
+                    val msg = cameraController?.setFlashEnabled(enabled) ?: run {
+                        setTorchSafely(enabled)
+                        if (enabled) "Flashlight turned ON" else "Flashlight turned OFF"
+                    }
+                    ToolExecutionResult("setFlash", if (enabled) "Flash ON" else "Flash OFF", msg, isSuccess = true)
+                }
+
+                "setzoom" -> {
+                    val raw = action.params["level"]?.lowercase()?.trim() ?: "1.0"
+                    val msg = when {
+                        cameraController == null -> "Camera controller unavailable"
+                        raw == "in" || raw == "up" -> cameraController.adjustZoomBy(0.5f)
+                        raw == "out" || raw == "down" -> cameraController.adjustZoomBy(-0.5f)
+                        else -> cameraController.setZoomRatio(raw.toFloatOrNull() ?: 1.0f)
+                    }
+                    ToolExecutionResult("setZoom", "Camera Zoom", msg, isSuccess = cameraController != null)
+                }
+
+                "opengoogle" -> {
+                    val res = appLauncher.openGoogleApp()
+                    ToolExecutionResult(
+                        actionName = "openGoogle",
+                        displayTitle = res.appName,
+                        message = res.message,
+                        linkUrl = res.fallbackUrl,
+                        isSuccess = res.success
+                    )
+                }
+
+                "googlesearch" -> {
+                    val query = action.params["query"] ?: action.params["q"] ?: ""
+                    if (query.isBlank()) {
+                        return ToolExecutionResult("googleSearch", "Google Search", "Search query cannot be empty", isSuccess = false)
+                    }
+                    val res = appLauncher.openGoogleSearch(query)
+                    onRunAiSearchSummary?.invoke(query)
+                    ToolExecutionResult(
+                        actionName = "googleSearch",
+                        displayTitle = "Google: \"$query\"",
+                        message = res.message,
+                        linkUrl = res.fallbackUrl,
+                        isSuccess = res.success
+                    )
+                }
+
+                "youtubesearch" -> {
+                    val query = action.params["query"] ?: action.params["q"] ?: ""
+                    if (query.isBlank()) {
+                        return ToolExecutionResult("youtubeSearch", "YouTube Search", "Search query cannot be empty", isSuccess = false)
+                    }
+                    val res = appLauncher.openYouTubeSearch(query)
+                    ToolExecutionResult(
+                        actionName = "youtubeSearch",
+                        displayTitle = "YouTube: \"$query\"",
+                        message = res.message,
+                        linkUrl = res.fallbackUrl,
+                        isSuccess = res.success
+                    )
+                }
+
+                "verifyapplaunch" -> {
+                    val pkg = action.params["packageName"] ?: action.params["appName"] ?: ""
+                    val res = appLauncher.verifyAppLaunch(pkg)
+                    ToolExecutionResult(
+                        actionName = "verifyAppLaunch",
+                        displayTitle = "Verify: ${res.appName}",
+                        message = "${res.message} ${res.verificationDetail}".trim(),
+                        isSuccess = res.success
+                    )
+                }
+
+                "stopautomation" -> {
+                    MahiAccessibilityService.stopAllGestures()
+                    cameraController?.stopVideoRecording()
+                    ToolExecutionResult(
+                        actionName = "stopAutomation",
+                        displayTitle = "Stopped",
+                        message = "Stopped active gestures and automation.",
+                        isSuccess = true
+                    )
+                }
+
                 "openwebsite" -> {
-                    val titleOrUrl = action.params["title"] ?: action.params["url"] ?: ""
-                    val known = AppLauncherManager.matchKnownApp(titleOrUrl)
+                    val titleOrUrl = action.params["url"] ?: action.params["title"] ?: ""
+                    val known = if (!titleOrUrl.contains(".")) AppLauncherManager.matchKnownApp(titleOrUrl) else null
                     if (known != null) {
                         val launchRes = appLauncher.launchApp(known.canonicalName, openStoreOrWebIfMissing = true)
                         return ToolExecutionResult(
@@ -67,33 +230,21 @@ class MahiToolsManager(private val context: Context) {
                             isSuccess = launchRes.success
                         )
                     }
-
-                    val rawUrl = action.params["url"] ?: action.params["link"] ?: "https://google.com"
-                    val formattedUrl = if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
-                        rawUrl
-                    } else {
-                        "https://$rawUrl"
-                    }
-                    val label = action.params["title"] ?: action.params["label"] ?: getDomainName(formattedUrl)
-
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(formattedUrl)).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                    }
-                    context.startActivity(intent)
-
+                    val res = appLauncher.openWebsite(titleOrUrl, action.params["title"])
                     ToolExecutionResult(
                         actionName = "openWebsite",
-                        displayTitle = "Opened $label",
-                        message = "Launched $formattedUrl",
-                        linkUrl = formattedUrl
+                        displayTitle = res.appName,
+                        message = res.message,
+                        linkUrl = res.fallbackUrl,
+                        isSuccess = res.success
                     )
                 }
 
                 "screengesture" -> {
                     val gestureAction = action.params["action"] ?: "SWIPE_DOWN"
                     val targetText = action.params["targetText"].orEmpty()
-                    val outcome = com.example.automation.MahiAccessibilityService.executeGestureIntent(
-                        com.example.automation.VoiceGestureIntent(
+                    val outcome = MahiAccessibilityService.executeGestureIntent(
+                        VoiceGestureIntent(
                             actionName = gestureAction,
                             targetText = targetText
                         )
@@ -112,24 +263,21 @@ class MahiToolsManager(private val context: Context) {
                     if (target.equals("youtube", ignoreCase = true)) {
                         val ytRes = appLauncher.openYouTubeSearch(query)
                         return ToolExecutionResult(
-                            actionName = "searchWeb",
+                            actionName = "youtubeSearch",
                             displayTitle = "YouTube: \"$query\"",
                             message = ytRes.message,
                             linkUrl = ytRes.fallbackUrl,
                             isSuccess = ytRes.success
                         )
                     }
-                    val searchUrl = "https://www.google.com/search?q=" + Uri.encode(query)
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(searchUrl)).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                    }
-                    context.startActivity(intent)
-
+                    val gRes = appLauncher.openGoogleSearch(query)
+                    onRunAiSearchSummary?.invoke(query)
                     ToolExecutionResult(
-                        actionName = "searchWeb",
-                        displayTitle = "Searched: \"$query\"",
-                        message = "Found results for $query",
-                        linkUrl = searchUrl
+                        actionName = "googleSearch",
+                        displayTitle = "Google: \"$query\"",
+                        message = gRes.message,
+                        linkUrl = gRes.fallbackUrl,
+                        isSuccess = gRes.success
                     )
                 }
 
@@ -164,15 +312,7 @@ class MahiToolsManager(private val context: Context) {
                         "off", "false", "disable" -> false
                         else -> !isTorchOn
                     }
-
-                    cameraManager?.let { cm ->
-                        val cameraId = cm.cameraIdList.firstOrNull()
-                        if (cameraId != null) {
-                            cm.setTorchMode(cameraId, turnOn)
-                            isTorchOn = turnOn
-                        }
-                    }
-
+                    setTorchSafely(turnOn)
                     ToolExecutionResult(
                         actionName = "toggleFlashlight",
                         displayTitle = if (turnOn) "Flashlight On 🔦" else "Flashlight Off 💡",
@@ -192,9 +332,9 @@ class MahiToolsManager(private val context: Context) {
                 else -> {
                     ToolExecutionResult(
                         actionName = action.name,
-                        displayTitle = "Action Executed",
-                        message = "Completed action ${action.name}",
-                        isSuccess = true
+                        displayTitle = "Unknown Command",
+                        message = "Unsupported tool '${action.name}' ignored safely.",
+                        isSuccess = false
                     )
                 }
             }
@@ -209,12 +349,13 @@ class MahiToolsManager(private val context: Context) {
         }
     }
 
-    private fun getDomainName(url: String): String {
-        return try {
-            val uri = Uri.parse(url)
-            uri.host?.replace("www.", "")?.replaceFirstChar { it.uppercase() } ?: "Link"
-        } catch (e: Exception) {
-            "Link"
+    private fun setTorchSafely(turnOn: Boolean) {
+        cameraManager?.let { cm ->
+            val cameraId = cm.cameraIdList.firstOrNull()
+            if (cameraId != null) {
+                cm.setTorchMode(cameraId, turnOn)
+                isTorchOn = turnOn
+            }
         }
     }
 }
