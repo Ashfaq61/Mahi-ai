@@ -6,6 +6,7 @@ import android.hardware.camera2.CameraManager
 import android.net.Uri
 import android.provider.AlarmClock
 import android.util.Log
+import com.example.automation.AppLauncherManager
 
 data class ToolAction(
     val name: String,
@@ -36,10 +37,37 @@ class MahiToolsManager(private val context: Context) {
 
     private var isTorchOn: Boolean = false
 
+    private val appLauncher by lazy { AppLauncherManager(context) }
+
     fun execute(action: ToolAction): ToolExecutionResult {
         return try {
             when (action.name.lowercase().trim()) {
-                "openwebsite", "openapp" -> {
+                "openapp" -> {
+                    val target = action.params["appName"] ?: action.params["title"] ?: action.params["url"] ?: ""
+                    val launchRes = appLauncher.launchApp(target, openStoreOrWebIfMissing = true)
+                    ToolExecutionResult(
+                        actionName = "openApp",
+                        displayTitle = launchRes.appName,
+                        message = launchRes.message,
+                        linkUrl = launchRes.fallbackUrl,
+                        isSuccess = launchRes.success
+                    )
+                }
+
+                "openwebsite" -> {
+                    val titleOrUrl = action.params["title"] ?: action.params["url"] ?: ""
+                    val known = AppLauncherManager.matchKnownApp(titleOrUrl)
+                    if (known != null) {
+                        val launchRes = appLauncher.launchApp(known.canonicalName, openStoreOrWebIfMissing = true)
+                        return ToolExecutionResult(
+                            actionName = "openApp",
+                            displayTitle = launchRes.appName,
+                            message = launchRes.message,
+                            linkUrl = launchRes.fallbackUrl,
+                            isSuccess = launchRes.success
+                        )
+                    }
+
                     val rawUrl = action.params["url"] ?: action.params["link"] ?: "https://google.com"
                     val formattedUrl = if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
                         rawUrl
@@ -61,8 +89,36 @@ class MahiToolsManager(private val context: Context) {
                     )
                 }
 
+                "screengesture" -> {
+                    val gestureAction = action.params["action"] ?: "SWIPE_DOWN"
+                    val targetText = action.params["targetText"].orEmpty()
+                    val outcome = com.example.automation.MahiAccessibilityService.executeGestureIntent(
+                        com.example.automation.VoiceGestureIntent(
+                            actionName = gestureAction,
+                            targetText = targetText
+                        )
+                    )
+                    ToolExecutionResult(
+                        actionName = "screenGesture",
+                        displayTitle = gestureAction.replace('_', ' '),
+                        message = outcome.message,
+                        isSuccess = outcome.success
+                    )
+                }
+
                 "searchweb" -> {
                     val query = action.params["query"] ?: action.params["q"] ?: "Mahi AI"
+                    val target = action.params["target"].orEmpty()
+                    if (target.equals("youtube", ignoreCase = true)) {
+                        val ytRes = appLauncher.openYouTubeSearch(query)
+                        return ToolExecutionResult(
+                            actionName = "searchWeb",
+                            displayTitle = "YouTube: \"$query\"",
+                            message = ytRes.message,
+                            linkUrl = ytRes.fallbackUrl,
+                            isSuccess = ytRes.success
+                        )
+                    }
                     val searchUrl = "https://www.google.com/search?q=" + Uri.encode(query)
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(searchUrl)).apply {
                         flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -156,7 +212,7 @@ class MahiToolsManager(private val context: Context) {
     private fun getDomainName(url: String): String {
         return try {
             val uri = Uri.parse(url)
-            uri.host?.replace("www.", "")?.capitalize() ?: "Link"
+            uri.host?.replace("www.", "")?.replaceFirstChar { it.uppercase() } ?: "Link"
         } catch (e: Exception) {
             "Link"
         }

@@ -8,9 +8,18 @@ import android.util.Log
 import com.example.api.ApiErrorCategory
 import com.example.api.isGeminiLiveAudioModel
 import com.example.tools.ToolAction
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -20,6 +29,9 @@ import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.sin
@@ -30,6 +42,15 @@ data class GeminiLiveError(
     val message: String
 )
 
+enum class GeminiLiveConnectionPhase {
+    DISCONNECTED,
+    CONNECTING,
+    CONNECTED_LISTENING,
+    SPEAKING,
+    RECONNECTING,
+    ERROR
+}
+
 interface GeminiLiveCallbacks {
     fun onSetupComplete()
     fun onUserTranscript(text: String)
@@ -37,17 +58,20 @@ interface GeminiLiveCallbacks {
     fun onAssistantSpeakingChanged(isSpeaking: Boolean)
     fun onToolCall(id: String, action: ToolAction)
     fun onInterrupted()
+    fun onReconnecting(attempt: Int, maxAttempts: Int, reason: String) {}
     fun onError(error: GeminiLiveError)
     fun onDisconnected()
 }
 
 /**
- * Real-time Gemini Multimodal Live API WebSocket client (Audio-to-Audio ONLY).
- * - Streams PCM16 16kHz microphone audio upward
- * - Plays 24kHz PCM16 voice responses via AudioTrack
- * - Executes function calls and sends toolResponse immediately
- * - Handles server & client interruptions
- * - Reports explicit API/key/quota/model/network errors without silent text fallback
+ * Persistent full-duplex Gemini Multimodal Live WebSocket client (Audio-to-Audio ONLY):
+ * - Awaits setupComplete strictly before sending queued 16kHz PCM audio chunks
+ * - Decodes & plays every 24kHz PCM audio chunk sequentially via a persistent Channel -> AudioTrack worker
+ * - Prevents premature turnComplete playback truncation by letting queued audio finish draining
+ * - Supports immediate interruption / barge-in without stopping continuous mic streaming
+ * - Prevents duplicate sessions via monotonic sessionGeneration IDs
+ * - Auto-reconnects on transient drops with bounded exponential backoff + conversation context preservation
+ * - Never exposes API keys in logs and never silently downgrades to text-only mode
  */
 class GeminiLiveClient(
     private val okHttpClient: OkHttpClient = defaultWebSocketClient()
@@ -57,6 +81,7 @@ class GeminiLiveClient(
         private const val LIVE_WS_ENDPOINT =
             "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
         private const val OUTPUT_SAMPLE_RATE = 24000
+        const val MAX_RECONNECT_ATTEMPTS = 3
 
         fun defaultWebSocketClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
@@ -71,7 +96,11 @@ class GeminiLiveClient(
                 .build()
         }
 
-        fun buildSetupMessage(model: String, systemPrompt: String): String {
+        fun buildSetupMessage(
+            model: String,
+            systemPrompt: String,
+            voiceName: String = "Aoede"
+        ): String {
             val cleanModel = if (model.startsWith("models/")) model else "models/$model"
             return JSONObject().apply {
                 put("setup", JSONObject().apply {
@@ -81,7 +110,7 @@ class GeminiLiveClient(
                         put("speechConfig", JSONObject().apply {
                             put("voiceConfig", JSONObject().apply {
                                 put("prebuiltVoiceConfig", JSONObject().apply {
-                                    put("voiceName", "Aoede")
+                                    put("voiceName", voiceName)
                                 })
                             })
                         })
@@ -104,8 +133,21 @@ class GeminiLiveClient(
 
         private fun buildToolDeclarations(): JSONArray = JSONArray().apply {
             put(JSONObject().apply {
+                put("name", "openApp")
+                put("description", "Launch an Android app on the phone such as TikTok, Facebook, YouTube, WhatsApp, Instagram, Spotify, or any installed app.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("appName", JSONObject().apply { put("type", "STRING") })
+                        put("url", JSONObject().apply { put("type", "STRING") })
+                        put("followUpGesture", JSONObject().apply { put("type", "STRING") })
+                    })
+                    put("required", JSONArray().apply { put("appName") })
+                })
+            })
+            put(JSONObject().apply {
                 put("name", "openWebsite")
-                put("description", "Open a website or app URL on the user's phone.")
+                put("description", "Open a website URL or web app on the user's phone.")
                 put("parameters", JSONObject().apply {
                     put("type", "OBJECT")
                     put("properties", JSONObject().apply {
@@ -116,12 +158,25 @@ class GeminiLiveClient(
                 })
             })
             put(JSONObject().apply {
+                put("name", "screenGesture")
+                put("description", "Control screen gestures: SWIPE_UP, SWIPE_DOWN, SWIPE_LEFT, SWIPE_RIGHT, FAST_SCROLL_DOWN, FAST_SCROLL_UP, SCROLL_TOP, SCROLL_BOTTOM, CONTINUOUS_SCROLL_DOWN, CONTINUOUS_SCROLL_UP, TAP_TEXT, DOUBLE_TAP, LONG_PRESS, STOP.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("action", JSONObject().apply { put("type", "STRING") })
+                        put("targetText", JSONObject().apply { put("type", "STRING") })
+                    })
+                    put("required", JSONArray().apply { put("action") })
+                })
+            })
+            put(JSONObject().apply {
                 put("name", "searchWeb")
-                put("description", "Search the web for a query.")
+                put("description", "Search the web or YouTube for a query.")
                 put("parameters", JSONObject().apply {
                     put("type", "OBJECT")
                     put("properties", JSONObject().apply {
                         put("query", JSONObject().apply { put("type", "STRING") })
+                        put("target", JSONObject().apply { put("type", "STRING") })
                     })
                     put("required", JSONArray().apply { put("query") })
                 })
@@ -195,15 +250,64 @@ class GeminiLiveClient(
                 }
             }
         }
+
+        fun isRecoverableError(error: GeminiLiveError): Boolean {
+            return error.category == ApiErrorCategory.CONNECTION_FAILED
+        }
     }
 
+    private sealed class PlaybackCommand {
+        class AudioChunk(val pcmBytes: ByteArray) : PlaybackCommand()
+        object TurnCompleteMarker : PlaybackCommand()
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val sessionCounter = AtomicLong(0L)
+    private val reconnectAttempts = AtomicInteger(0)
+    private val isPlaybackDrainingTurn = AtomicBoolean(false)
+
+    @Volatile
     private var webSocket: WebSocket? = null
+
+    @Volatile
     private var audioTrack: AudioTrack? = null
+
+    @Volatile
     private var isSetupComplete = false
+
+    @Volatile
     private var isConnected = false
+
+    @Volatile
     private var isMuted = false
+
+    @Volatile
     private var manualDisconnect = false
+
+    @Volatile
     private var callbacks: GeminiLiveCallbacks? = null
+
+    // Session params retained for bounded reconnect & context continuity
+    private var lastApiKey: String = ""
+    private var lastModel: String = ""
+    private var lastSystemPrompt: String = ""
+    private var lastVoiceName: String = "Aoede"
+    private val recentTurns = mutableListOf<Pair<String, String>>() // role to text
+    private var reconnectJob: Job? = null
+
+    // Inbound pre-setup audio buffer (drops oldest if setup handshake is still in progress)
+    private var inboundAudioBuffer = Channel<ByteArray>(
+        capacity = 48,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    private var inboundFlushJob: Job? = null
+
+    // Persistent sequential playback queue so all PCM chunks play cleanly in order
+    private var playbackQueue = Channel<PlaybackCommand>(capacity = Channel.UNLIMITED)
+    private var playbackJob: Job? = null
+
+    private val _connectionPhase = MutableStateFlow(GeminiLiveConnectionPhase.DISCONNECTED)
+    val connectionPhase: StateFlow<GeminiLiveConnectionPhase> = _connectionPhase.asStateFlow()
 
     private val _speakingWaveform = MutableStateFlow(List(32) { 0.05f })
     val speakingWaveform: StateFlow<List<Float>> = _speakingWaveform.asStateFlow()
@@ -212,18 +316,27 @@ class GeminiLiveClient(
 
     fun setMuted(muted: Boolean) {
         isMuted = muted
-        if (muted) stopAudioPlayback()
+        if (muted) flushPlaybackQueueOnly()
+    }
+
+    fun updateSystemInstruction(newSystemPrompt: String) {
+        lastSystemPrompt = newSystemPrompt
     }
 
     fun connect(
         apiKey: String,
         model: String,
         systemPrompt: String,
-        callbacks: GeminiLiveCallbacks
+        callbacks: GeminiLiveCallbacks,
+        voiceName: String = "Aoede"
     ) {
-        disconnect()
+        reconnectJob?.cancel()
+        reconnectAttempts.set(0)
+        recentTurns.clear()
+
         val trimmedKey = apiKey.trim()
         if (trimmedKey.isEmpty()) {
+            _connectionPhase.value = GeminiLiveConnectionPhase.ERROR
             callbacks.onError(
                 GeminiLiveError(
                     ApiErrorCategory.MISSING_KEY,
@@ -234,6 +347,7 @@ class GeminiLiveClient(
         }
 
         if (!isGeminiLiveAudioModel(model)) {
+            _connectionPhase.value = GeminiLiveConnectionPhase.ERROR
             callbacks.onError(
                 GeminiLiveError(
                     ApiErrorCategory.UNSUPPORTED_MODEL,
@@ -243,64 +357,112 @@ class GeminiLiveClient(
             return
         }
 
+        lastApiKey = trimmedKey
+        lastModel = model
+        lastSystemPrompt = systemPrompt
+        lastVoiceName = voiceName
         this.callbacks = callbacks
-        this.manualDisconnect = false
-        this.isSetupComplete = false
-        initAudioTrack()
 
-        val request = buildWebSocketRequest(trimmedKey)
+        openWebSocketInternal(isReconnectAttempt = false)
+    }
+
+    private fun openWebSocketInternal(isReconnectAttempt: Boolean) {
+        // Cleanly close any stale socket before opening a new generation
+        closeSocketOnly(manual = true)
+
+        val generation = sessionCounter.incrementAndGet()
+        manualDisconnect = false
+        isConnected = false
+        isSetupComplete = false
+        _connectionPhase.value = if (isReconnectAttempt) {
+            GeminiLiveConnectionPhase.RECONNECTING
+        } else {
+            GeminiLiveConnectionPhase.CONNECTING
+        }
+
+        ensurePlaybackWorkerRunning()
+        ensureInboundAudioWorkerRunning(generation)
+
+        val request = buildWebSocketRequest(lastApiKey)
         webSocket = okHttpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (sessionCounter.get() != generation) {
+                    webSocket.close(1000, "Superseded session")
+                    return
+                }
                 isConnected = true
-                val setupPayload = buildSetupMessage(model, systemPrompt)
+                val setupPayload = buildSetupMessage(lastModel, lastSystemPrompt, lastVoiceName)
                 webSocket.send(setupPayload)
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (sessionCounter.get() != generation) return
                 handleServerMessage(text)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (sessionCounter.get() != generation) return
                 handleServerMessage(bytes.utf8())
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                if (sessionCounter.get() != generation) return
                 webSocket.close(1000, null)
                 if (!manualDisconnect && code != 1000) {
-                    isConnected = false
-                    isSetupComplete = false
-                    stopAudioPlayback()
-                    callbacks.onError(classifyCloseOrFailureError(code, reason))
+                    handleConnectionInterruption(code, reason)
                 }
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                val wasManual = manualDisconnect
+                if (sessionCounter.get() != generation) return
                 isConnected = false
                 isSetupComplete = false
-                stopAudioPlayback()
-                if (!wasManual) {
+                if (!manualDisconnect) {
                     if (code != 1000) {
-                        callbacks.onError(classifyCloseOrFailureError(code, reason))
+                        handleConnectionInterruption(code, reason)
                     } else {
-                        callbacks.onDisconnected()
+                        _connectionPhase.value = GeminiLiveConnectionPhase.DISCONNECTED
+                        callbacks?.onDisconnected()
                     }
                 }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                val wasManual = manualDisconnect
+                if (sessionCounter.get() != generation) return
                 isConnected = false
                 isSetupComplete = false
-                stopAudioPlayback()
-                if (!wasManual) {
+                if (!manualDisconnect) {
                     val msg = response?.message?.takeIf { it.isNotBlank() }
                         ?: t.localizedMessage
                         ?: "WebSocket handshake failed"
-                    callbacks.onError(classifyCloseOrFailureError(response?.code, msg))
+                    handleConnectionInterruption(response?.code, msg)
                 }
             }
         })
+    }
+
+    private fun handleConnectionInterruption(code: Int?, reasonOrMessage: String) {
+        val error = classifyCloseOrFailureError(code, reasonOrMessage)
+        val attempt = reconnectAttempts.incrementAndGet()
+
+        if (isRecoverableError(error) && attempt <= MAX_RECONNECT_ATTEMPTS && lastApiKey.isNotBlank()) {
+            val backoffMs = 1000L * (1 shl (attempt - 1)) // 1s, 2s, 4s
+            _connectionPhase.value = GeminiLiveConnectionPhase.RECONNECTING
+            callbacks?.onReconnecting(attempt, MAX_RECONNECT_ATTEMPTS, error.message)
+            reconnectJob?.cancel()
+            reconnectJob = scope.launch {
+                delay(backoffMs)
+                if (!manualDisconnect) {
+                    openWebSocketInternal(isReconnectAttempt = true)
+                }
+            }
+        } else {
+            isConnected = false
+            isSetupComplete = false
+            stopAudioPlaybackWorker()
+            _connectionPhase.value = GeminiLiveConnectionPhase.ERROR
+            callbacks?.onError(error)
+        }
     }
 
     private fun handleServerMessage(rawJson: String) {
@@ -311,30 +473,45 @@ class GeminiLiveClient(
                 val errObj = json.optJSONObject("error")
                 val code = errObj?.optInt("code")
                 val msg = errObj?.optString("message") ?: json.optString("error")
-                callbacks?.onError(classifyCloseOrFailureError(code, msg))
+                val error = classifyCloseOrFailureError(code, msg)
+                _connectionPhase.value = GeminiLiveConnectionPhase.ERROR
+                callbacks?.onError(error)
                 return
             }
 
             if (json.has("setupComplete")) {
+                val wasReconnect = reconnectAttempts.get() > 0
+                reconnectAttempts.set(0)
                 isSetupComplete = true
+                _connectionPhase.value = GeminiLiveConnectionPhase.CONNECTED_LISTENING
+                if (wasReconnect && recentTurns.isNotEmpty()) {
+                    replayRecentContextSummary()
+                }
                 callbacks?.onSetupComplete()
             }
 
             val serverContent = json.optJSONObject("serverContent")
             if (serverContent != null) {
                 if (serverContent.optBoolean("interrupted", false)) {
-                    stopAudioPlayback()
+                    flushPlaybackQueueOnly()
+                    _connectionPhase.value = GeminiLiveConnectionPhase.CONNECTED_LISTENING
                     callbacks?.onAssistantSpeakingChanged(false)
                     callbacks?.onInterrupted()
                 }
 
                 serverContent.optJSONObject("inputTranscription")?.optString("text")
                     ?.takeIf { it.isNotBlank() }
-                    ?.let { callbacks?.onUserTranscript(it) }
+                    ?.let { userText ->
+                        appendRecentTurn("user", userText)
+                        callbacks?.onUserTranscript(userText)
+                    }
 
                 serverContent.optJSONObject("outputTranscription")?.optString("text")
                     ?.takeIf { it.isNotBlank() }
-                    ?.let { callbacks?.onAssistantTranscript(it) }
+                    ?.let { modelText ->
+                        appendRecentTurn("model", modelText)
+                        callbacks?.onAssistantTranscript(modelText)
+                    }
 
                 val modelTurn = serverContent.optJSONObject("modelTurn")
                 val parts = modelTurn?.optJSONArray("parts")
@@ -347,15 +524,19 @@ class GeminiLiveClient(
                             val b64 = inlineData.optString("data")
                             if (mime.startsWith("audio/pcm") && b64.isNotBlank()) {
                                 val pcmBytes = Base64.decode(b64, Base64.DEFAULT)
-                                playPcmAudioChunk(pcmBytes)
+                                if (pcmBytes.isNotEmpty() && !isMuted) {
+                                    isPlaybackDrainingTurn.set(true)
+                                    _connectionPhase.value = GeminiLiveConnectionPhase.SPEAKING
+                                    playbackQueue.trySend(PlaybackCommand.AudioChunk(pcmBytes))
+                                }
                             }
                         }
                     }
                 }
 
                 if (serverContent.optBoolean("turnComplete", false)) {
-                    _speakingWaveform.value = List(32) { 0.05f }
-                    callbacks?.onAssistantSpeakingChanged(false)
+                    // Signal worker that turn finished generating; worker fires speakingChanged(false) ONLY after draining!
+                    playbackQueue.trySend(PlaybackCommand.TurnCompleteMarker)
                 }
             }
 
@@ -379,8 +560,66 @@ class GeminiLiveClient(
         }
     }
 
+    private fun appendRecentTurn(role: String, text: String) {
+        synchronized(recentTurns) {
+            if (recentTurns.lastOrNull()?.first == role) {
+                val prev = recentTurns.removeAt(recentTurns.lastIndex)
+                recentTurns.add(role to (prev.second + " " + text).takeLast(320))
+            } else {
+                recentTurns.add(role to text.take(320))
+            }
+            while (recentTurns.size > 6) recentTurns.removeAt(0)
+        }
+    }
+
+    private fun replayRecentContextSummary() {
+        val summaryText = synchronized(recentTurns) {
+            recentTurns.joinToString("\n") { "${it.first}: ${it.second}" }
+        }
+        if (summaryText.isBlank()) return
+        val payload = JSONObject().apply {
+            put("clientContent", JSONObject().apply {
+                put("turns", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", "[Context continuity after reconnect — do not reply unless spoken to]:\n$summaryText")
+                            })
+                        })
+                    })
+                })
+                put("turnComplete", false)
+            })
+        }.toString()
+        webSocket?.send(payload)
+    }
+
+    private fun ensureInboundAudioWorkerRunning(generation: Long) {
+        inboundFlushJob?.cancel()
+        inboundAudioBuffer.close()
+        inboundAudioBuffer = Channel(capacity = 48, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+        inboundFlushJob = scope.launch {
+            for (chunk in inboundAudioBuffer) {
+                if (sessionCounter.get() != generation || manualDisconnect) break
+                if (isConnected && isSetupComplete) {
+                    sendPcmChunkOverSocket(chunk)
+                }
+            }
+        }
+    }
+
     fun sendPcmAudioChunk(pcm16At16kBytes: ByteArray) {
-        if (!isConnected || !isSetupComplete || pcm16At16kBytes.isEmpty()) return
+        if (pcm16At16kBytes.isEmpty() || manualDisconnect) return
+        if (isConnected && isSetupComplete) {
+            sendPcmChunkOverSocket(pcm16At16kBytes)
+        } else {
+            // Buffer cleanly during brief setupComplete / reconnect window without blocking caller
+            inboundAudioBuffer.trySend(pcm16At16kBytes)
+        }
+    }
+
+    private fun sendPcmChunkOverSocket(pcm16At16kBytes: ByteArray) {
         val b64 = Base64.encodeToString(pcm16At16kBytes, Base64.NO_WRAP)
         val payload = JSONObject().apply {
             put("realtimeInput", JSONObject().apply {
@@ -415,7 +654,8 @@ class GeminiLiveClient(
     }
 
     fun sendTextPromptOverAudioSession(prompt: String) {
-        if (!isConnected || !isSetupComplete) return
+        if (!isConnected || !isSetupComplete || prompt.isBlank()) return
+        appendRecentTurn("user", prompt)
         val payload = JSONObject().apply {
             put("clientContent", JSONObject().apply {
                 put("turns", JSONArray().apply {
@@ -433,12 +673,42 @@ class GeminiLiveClient(
     }
 
     fun interruptPlayback() {
-        stopAudioPlayback()
+        flushPlaybackQueueOnly()
+        if (isConnected && isSetupComplete) {
+            _connectionPhase.value = GeminiLiveConnectionPhase.CONNECTED_LISTENING
+        }
         callbacks?.onAssistantSpeakingChanged(false)
     }
 
+    private fun ensurePlaybackWorkerRunning() {
+        if (playbackJob?.isActive == true) return
+        playbackQueue.close()
+        playbackQueue = Channel(capacity = Channel.UNLIMITED)
+        playbackJob = scope.launch {
+            initAudioTrack()
+            for (cmd in playbackQueue) {
+                if (!isActive || manualDisconnect) break
+                when (cmd) {
+                    is PlaybackCommand.AudioChunk -> {
+                        if (!isMuted) {
+                            writePcmToTrack(cmd.pcmBytes)
+                        }
+                    }
+                    PlaybackCommand.TurnCompleteMarker -> {
+                        isPlaybackDrainingTurn.set(false)
+                        _speakingWaveform.value = List(32) { 0.05f }
+                        if (isConnected && isSetupComplete) {
+                            _connectionPhase.value = GeminiLiveConnectionPhase.CONNECTED_LISTENING
+                        }
+                        callbacks?.onAssistantSpeakingChanged(false)
+                    }
+                }
+            }
+        }
+    }
+
     private fun initAudioTrack() {
-        stopAudioPlayback()
+        releaseAudioTrackOnly()
         try {
             val minBuf = AudioTrack.getMinBufferSize(
                 OUTPUT_SAMPLE_RATE,
@@ -459,17 +729,17 @@ class GeminiLiveClient(
                         .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                         .build()
                 )
-                .setBufferSizeInBytes(maxOf(minBuf * 2, 8192))
+                .setBufferSizeInBytes(maxOf(minBuf * 3, 16384))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
             audioTrack?.play()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize 24kHz AudioTrack", e)
+            Log.e(TAG, "Failed to initialize persistent 24kHz AudioTrack", e)
         }
     }
 
-    private fun playPcmAudioChunk(pcmBytes: ByteArray) {
-        if (isMuted || pcmBytes.isEmpty()) return
+    private fun writePcmToTrack(pcmBytes: ByteArray) {
+        if (pcmBytes.isEmpty()) return
         callbacks?.onAssistantSpeakingChanged(true)
 
         var sumSquares = 0.0
@@ -495,13 +765,32 @@ class GeminiLiveClient(
             if (audioTrack == null || audioTrack?.playState != AudioTrack.PLAYSTATE_PLAYING) {
                 initAudioTrack()
             }
-            audioTrack?.write(pcmBytes, 0, pcmBytes.size)
+            var offset = 0
+            while (offset < pcmBytes.size && !manualDisconnect && !isMuted) {
+                val written = audioTrack?.write(pcmBytes, offset, pcmBytes.size - offset) ?: break
+                if (written <= 0) break
+                offset += written
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "Error writing PCM chunk to AudioTrack", e)
+            Log.w(TAG, "Error streaming PCM chunk to AudioTrack", e)
         }
     }
 
-    private fun stopAudioPlayback() {
+    private fun flushPlaybackQueueOnly() {
+        while (playbackQueue.tryReceive().isSuccess) {
+            // Drain unplayed audio chunks immediately on barge-in
+        }
+        isPlaybackDrainingTurn.set(false)
+        _speakingWaveform.value = List(32) { 0.05f }
+        try {
+            audioTrack?.pause()
+            audioTrack?.flush()
+            audioTrack?.play()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun releaseAudioTrackOnly() {
         _speakingWaveform.value = List(32) { 0.05f }
         try {
             audioTrack?.pause()
@@ -513,10 +802,15 @@ class GeminiLiveClient(
         audioTrack = null
     }
 
-    fun isSessionActive(): Boolean = isConnected && isSetupComplete
+    private fun stopAudioPlaybackWorker() {
+        playbackJob?.cancel()
+        playbackJob = null
+        playbackQueue.close()
+        releaseAudioTrackOnly()
+    }
 
-    fun disconnect() {
-        manualDisconnect = true
+    private fun closeSocketOnly(manual: Boolean) {
+        manualDisconnect = manual
         isConnected = false
         isSetupComplete = false
         try {
@@ -524,6 +818,19 @@ class GeminiLiveClient(
         } catch (_: Exception) {
         }
         webSocket = null
-        stopAudioPlayback()
+    }
+
+    fun isSessionActive(): Boolean = isConnected && isSetupComplete
+
+    fun disconnect() {
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnectAttempts.set(0)
+        inboundFlushJob?.cancel()
+        inboundFlushJob = null
+        inboundAudioBuffer.close()
+        closeSocketOnly(manual = true)
+        stopAudioPlaybackWorker()
+        _connectionPhase.value = GeminiLiveConnectionPhase.DISCONNECTED
     }
 }

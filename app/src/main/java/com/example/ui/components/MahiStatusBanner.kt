@@ -70,9 +70,10 @@ fun MahiStatusBanner(
         AssistantVisualState.DISCONNECTED -> "STANDBY" to Color(0xFF94A3B8)
         AssistantVisualState.CONNECTING -> "CONNECTING" to CyberCyan
         AssistantVisualState.LISTENING -> "LISTENING" to CyberCyan
-        AssistantVisualState.THINKING -> "THINKING" to NeonViolet
+        AssistantVisualState.THINKING -> "PROCESSING" to NeonViolet
         AssistantVisualState.SPEAKING -> "SPEAKING" to NeonMagenta
-        AssistantVisualState.ERROR -> "DISCONNECTED" to Color(0xFFEF4444)
+        AssistantVisualState.RECONNECTING -> "RECONNECTING" to Color(0xFFF59E0B)
+        AssistantVisualState.ERROR -> "ERROR" to Color(0xFFEF4444)
     }
 
     val animatedDotColor by animateColorAsState(

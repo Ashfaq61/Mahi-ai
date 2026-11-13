@@ -54,7 +54,9 @@ enum class AppThemeMode(val id: String, val displayName: String) {
 
 data class MahiUserPrefs(
     val language: AppLanguage = AppLanguage.ENGLISH,
-    val themeMode: AppThemeMode = AppThemeMode.DARK
+    val themeMode: AppThemeMode = AppThemeMode.DARK,
+    val autoLanguageDetection: Boolean = true,
+    val pushToTalkMode: Boolean = false
 )
 
 class MahiPreferencesStore(context: Context) {
@@ -62,6 +64,8 @@ class MahiPreferencesStore(context: Context) {
         private const val PREFS_NAME = "mahi_app_prefs"
         private const val KEY_LANGUAGE = "app_language"
         private const val KEY_THEME_MODE = "app_theme_mode"
+        private const val KEY_AUTO_LANGUAGE = "auto_language_detection"
+        private const val KEY_PUSH_TO_TALK = "push_to_talk_mode"
     }
 
     private val prefs: SharedPreferences =
@@ -73,7 +77,14 @@ class MahiPreferencesStore(context: Context) {
     private fun load(): MahiUserPrefs {
         val lang = AppLanguage.fromId(prefs.getString(KEY_LANGUAGE, AppLanguage.ENGLISH.id))
         val theme = AppThemeMode.fromId(prefs.getString(KEY_THEME_MODE, AppThemeMode.DARK.id))
-        return MahiUserPrefs(language = lang, themeMode = theme)
+        val autoLang = prefs.getBoolean(KEY_AUTO_LANGUAGE, true)
+        val ptt = prefs.getBoolean(KEY_PUSH_TO_TALK, false)
+        return MahiUserPrefs(
+            language = lang,
+            themeMode = theme,
+            autoLanguageDetection = autoLang,
+            pushToTalkMode = ptt
+        )
     }
 
     fun setLanguage(language: AppLanguage) {
@@ -84,5 +95,15 @@ class MahiPreferencesStore(context: Context) {
     fun setThemeMode(themeMode: AppThemeMode) {
         prefs.edit().putString(KEY_THEME_MODE, themeMode.id).commit()
         _prefsFlow.value = _prefsFlow.value.copy(themeMode = themeMode)
+    }
+
+    fun setAutoLanguageDetection(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_LANGUAGE, enabled).commit()
+        _prefsFlow.value = _prefsFlow.value.copy(autoLanguageDetection = enabled)
+    }
+
+    fun setPushToTalkMode(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_PUSH_TO_TALK, enabled).commit()
+        _prefsFlow.value = _prefsFlow.value.copy(pushToTalkMode = enabled)
     }
 }

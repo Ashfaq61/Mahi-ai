@@ -2,16 +2,18 @@ package com.example.viewmodel
 
 import android.app.Application
 import android.content.Context
-import android.net.Uri
+import android.content.Intent
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.GeminiLiveCallbacks
 import com.example.ai.GeminiLiveClient
+import com.example.ai.GeminiLiveConnectionPhase
 import com.example.ai.GeminiLiveError
 import com.example.ai.MahiAiEngine
 import com.example.ai.MahiMood
@@ -27,18 +29,34 @@ import com.example.api.SecureApiKeyStore
 import com.example.api.isGeminiLiveAudioModel
 import com.example.audio.AudioRecordManager
 import com.example.audio.MahiSpeechSynthesizer
+import com.example.audio.MahiVoiceForegroundService
+import com.example.audio.MicCaptureState
 import com.example.audio.SpeechRecognitionManager
 import com.example.automation.AgentActionType
 import com.example.automation.AgentPlanStep
+import com.example.automation.AppLaunchResult
+import com.example.automation.AppLauncherManager
 import com.example.automation.AutomationHistoryEntry
 import com.example.automation.AutonomousAgentEngine
 import com.example.automation.CapturedNotification
 import com.example.automation.DeviceControlHelper
+import com.example.automation.GestureActionRecord
+import com.example.automation.InstalledAppInfo
 import com.example.automation.MahiAccessibilityService
 import com.example.automation.MahiNotificationService
 import com.example.automation.PendingSensitiveConfirmation
+import com.example.automation.RoutedVoiceCommand
 import com.example.automation.ScreenSnapshot
 import com.example.automation.SensitiveCategory
+import com.example.automation.VoiceCommandRouter
+import com.example.calls.ActiveCallState
+import com.example.calls.AiCallAssistantPhase
+import com.example.calls.CallAutomationPrefs
+import com.example.calls.CallAutomationRecord
+import com.example.calls.CallAutomationRepository
+import com.example.calls.CallRuleContact
+import com.example.calls.MahiInCallService
+import com.example.calls.TelecomCapabilityStatus
 import com.example.preferences.AppLanguage
 import com.example.preferences.AppThemeMode
 import com.example.preferences.MahiPreferencesStore
@@ -55,6 +73,7 @@ import com.example.vision.LiveVisionSnapshot
 import com.example.vision.NeuralLensAnalyzer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -68,6 +87,7 @@ enum class AssistantVisualState {
     LISTENING,
     THINKING,
     SPEAKING,
+    RECONNECTING,
     ERROR
 }
 
@@ -77,6 +97,8 @@ data class AssistantUiState(
     val liveUserText: String = "",
     val liveAssistantText: String = "Hey there! Tap the orb or say something to talk to me. Don't be shy!",
     val waveformBars: List<Float> = List(32) { 0.06f },
+    val micLevel: Float = 0f,
+    val isMicActivelyCapturing: Boolean = false,
     val lastExecutedTool: ToolExecutionResult? = null,
     val isContinuousMode: Boolean = true,
     val isMuted: Boolean = false,
@@ -85,6 +107,8 @@ data class AssistantUiState(
     val showSubtitles: Boolean = true,
     val errorMessage: String? = null,
     val errorCategory: ApiErrorCategory? = null,
+    val reconnectMessage: String? = null,
+    val backgroundMicNotice: String? = null,
     val isGeminiLiveActive: Boolean = false
 )
 
@@ -104,6 +128,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     private val aiEngine = MahiAiEngine(providerClient)
     private val toolsManager = MahiToolsManager(application)
 
+    val appLauncherManager = AppLauncherManager(application)
     val neuralLensAnalyzer = NeuralLensAnalyzer(providerClient)
     private val researchEngine = ResearchEngine(providerClient = providerClient)
     val deviceControlHelper = DeviceControlHelper(application)
@@ -118,6 +143,16 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
     val apiManagerState: StateFlow<ApiManagerState> = secureKeyStore.state
     val userPrefs: StateFlow<MahiUserPrefs> = preferencesStore.prefsFlow
+
+    // Navigation deep-link support from MahiDialerActivity
+    private val _requestedTab = MutableStateFlow<String?>(null)
+    val requestedTab: StateFlow<String?> = _requestedTab.asStateFlow()
+    private val _pendingDialNumber = MutableStateFlow("")
+    val pendingDialNumber: StateFlow<String> = _pendingDialNumber.asStateFlow()
+
+    // Installed searchable apps cache
+    private val _installedApps = MutableStateFlow<List<InstalledAppInfo>>(emptyList())
+    val installedApps: StateFlow<List<InstalledAppInfo>> = _installedApps.asStateFlow()
 
     // Neural Lens state
     val liveVisionSnapshot: StateFlow<LiveVisionSnapshot> = neuralLensAnalyzer.liveSnapshot
@@ -140,8 +175,11 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     private val _exportedPdf = MutableStateFlow<ExportedPdfResult?>(null)
     val exportedPdf: StateFlow<ExportedPdfResult?> = _exportedPdf.asStateFlow()
 
-    // Screen Intelligence, Notifications & Autonomous Agent state
+    // Screen Intelligence, Advanced Gestures, Notifications & Autonomous Agent state
     val screenSnapshot: StateFlow<ScreenSnapshot> = MahiAccessibilityService.screenSnapshot
+    val gestureStatus: StateFlow<String> = MahiAccessibilityService.gestureStatus
+    val isContinuousScrolling: StateFlow<Boolean> = MahiAccessibilityService.isContinuousScrolling
+    val gestureHistory: StateFlow<List<GestureActionRecord>> = MahiAccessibilityService.gestureHistory
     val activeNotifications: StateFlow<List<CapturedNotification>> = MahiNotificationService.notifications
     val agentPlanSteps: StateFlow<List<AgentPlanStep>> = autonomousAgentEngine.planSteps
     val isAgentRunning: StateFlow<Boolean> = autonomousAgentEngine.isRunning
@@ -151,8 +189,17 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     private val _screenAiAnalysis = MutableStateFlow("")
     val screenAiAnalysis: StateFlow<String> = _screenAiAnalysis.asStateFlow()
 
-    private var waveformCollectJob: Job? = null
-    private var recognitionCollectJob: Job? = null
+    // Call Automation & AI Call Assistant state
+    val callPrefs: StateFlow<CallAutomationPrefs> = CallAutomationRepository.prefs
+    val activeCall: StateFlow<ActiveCallState> = CallAutomationRepository.activeCall
+    val callHistory: StateFlow<List<CallAutomationRecord>> = CallAutomationRepository.callHistory
+    val callCapabilities: StateFlow<TelecomCapabilityStatus> = CallAutomationRepository.capabilities
+    val importantCallAlert: StateFlow<String?> = CallAutomationRepository.importantCallAlert
+
+    private val _callFeedback = MutableStateFlow<String?>(null)
+    val callFeedback: StateFlow<String?> = _callFeedback.asStateFlow()
+
+    private var collectJob: Job? = null
 
     private val vibrator: Vibrator? by lazy {
         try {
@@ -169,12 +216,18 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     }
 
     init {
+        CallAutomationRepository.init(application)
         speechSynthesizer.initialize()
-        val initialLang = preferencesStore.prefsFlow.value.language
-        aiEngine.currentLanguage = initialLang
-        speechSynthesizer.setSpeechLanguage(initialLang.ttsLanguageTag)
+        val initialPrefs = preferencesStore.prefsFlow.value
+        aiEngine.currentLanguage = initialPrefs.language
+        speechSynthesizer.setSpeechLanguage(initialPrefs.language.ttsLanguageTag)
+        speechRecognitionManager.preferredLanguageTag = initialPrefs.language.ttsLanguageTag
 
-        // Interrupt TTS playback when user speaks in standard turn-based mode
+        MahiVoiceForegroundService.onStopRequestedFromNotification = {
+            stopSession()
+        }
+
+        // Barge-in for standard turn-based providers
         speechRecognitionManager.onSpeechInterrupted = {
             if (_uiState.value.visualState == AssistantVisualState.SPEAKING && !_uiState.value.isGeminiLiveActive) {
                 speechSynthesizer.stop()
@@ -185,8 +238,28 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
             }
         }
 
-        observeSpeechRecognition()
-        observeWaveformVisualizer()
+        observeStreams()
+        refreshInstalledApps()
+    }
+
+    fun handleIncomingAppIntent(intent: Intent?) {
+        if (intent == null) return
+        val tab = intent.getStringExtra("open_tab")
+        val dialNumber = intent.getStringExtra("dial_number")
+        if (!dialNumber.isNullOrBlank()) {
+            _pendingDialNumber.value = dialNumber
+        }
+        if (!tab.isNullOrBlank()) {
+            _requestedTab.value = tab
+        }
+    }
+
+    fun consumeRequestedTab() {
+        _requestedTab.value = null
+    }
+
+    fun clearPendingDialNumber() {
+        _pendingDialNumber.value = ""
     }
 
     private fun shouldUseGeminiLiveAudio(): Boolean {
@@ -195,8 +268,8 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         return state.activeProvider == AiProvider.GEMINI && isGeminiLiveAudioModel(activeConfig.selectedModel)
     }
 
-    private fun observeSpeechRecognition() {
-        recognitionCollectJob = viewModelScope.launch {
+    private fun observeStreams() {
+        collectJob = viewModelScope.launch {
             launch {
                 speechRecognitionManager.partialText.collectLatest { text ->
                     if (text.isNotBlank() && !_uiState.value.isGeminiLiveActive) {
@@ -207,7 +280,6 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                     }
                 }
             }
-
             launch {
                 speechRecognitionManager.finalText.collectLatest { query ->
                     if (query.isNotBlank() && !_uiState.value.isGeminiLiveActive) {
@@ -215,14 +287,28 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                     }
                 }
             }
-        }
-    }
-
-    private fun observeWaveformVisualizer() {
-        waveformCollectJob = viewModelScope.launch {
+            launch {
+                audioRecordManager.captureState.collectLatest { cap ->
+                    val activelyCapturing = cap == MicCaptureState.CAPTURING
+                    val errorMsg = if (cap == MicCaptureState.PERMISSION_DENIED || cap == MicCaptureState.HARDWARE_ERROR) {
+                        audioRecordManager.lastCaptureError.value
+                    } else null
+                    _uiState.value = _uiState.value.copy(
+                        isMicActivelyCapturing = activelyCapturing,
+                        errorMessage = errorMsg ?: _uiState.value.errorMessage
+                    )
+                }
+            }
+            launch {
+                audioRecordManager.amplitudeFlow.collectLatest { amp ->
+                    _uiState.value = _uiState.value.copy(micLevel = amp)
+                }
+            }
             launch {
                 audioRecordManager.waveformBarsFlow.collectLatest { micBars ->
-                    if (_uiState.value.visualState == AssistantVisualState.LISTENING) {
+                    if (_uiState.value.visualState == AssistantVisualState.LISTENING ||
+                        _uiState.value.visualState == AssistantVisualState.RECONNECTING
+                    ) {
                         _uiState.value = _uiState.value.copy(waveformBars = micBars)
                     }
                 }
@@ -241,6 +327,11 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                     }
                 }
             }
+            launch {
+                MahiVoiceForegroundService.foregroundRestrictionNotice.collectLatest { notice ->
+                    _uiState.value = _uiState.value.copy(backgroundMicNotice = notice)
+                }
+            }
         }
     }
 
@@ -251,7 +342,28 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
             AssistantVisualState.SPEAKING -> interruptAssistant()
             AssistantVisualState.LISTENING,
             AssistantVisualState.THINKING,
-            AssistantVisualState.CONNECTING -> stopSession()
+            AssistantVisualState.CONNECTING,
+            AssistantVisualState.RECONNECTING -> stopSession()
+        }
+    }
+
+    fun startPushToTalkHold() {
+        if (!_uiState.value.isGeminiLiveActive) {
+            startSession()
+        } else {
+            audioRecordManager.isInputMuted = false
+            _uiState.value = _uiState.value.copy(isMuted = false, visualState = AssistantVisualState.LISTENING)
+        }
+    }
+
+    fun releasePushToTalkHold() {
+        if (userPrefs.value.pushToTalkMode) {
+            if (_uiState.value.isGeminiLiveActive) {
+                audioRecordManager.isInputMuted = true
+            } else {
+                speechRecognitionManager.stopListening()
+                audioRecordManager.stopListening()
+            }
         }
     }
 
@@ -265,17 +377,22 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
             _uiState.value = _uiState.value.copy(
                 visualState = AssistantVisualState.ERROR,
                 isGeminiLiveActive = false,
+                isMicActivelyCapturing = false,
                 errorCategory = ApiErrorCategory.MISSING_KEY,
                 errorMessage = "${activeProvider.displayName} API key missing. Open API Keys & Providers to add a key."
             )
             return
         }
 
+        // Start foreground microphone service cleanly so voice stays alive across TikTok/Facebook/YouTube
+        MahiVoiceForegroundService.start(getApplication())
+
         _uiState.value = _uiState.value.copy(
             visualState = AssistantVisualState.CONNECTING,
             liveUserText = "",
             errorMessage = null,
-            errorCategory = null
+            errorCategory = null,
+            reconnectMessage = null
         )
 
         if (shouldUseGeminiLiveAudio()) {
@@ -288,6 +405,25 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     private fun startGeminiLiveSession(apiKey: String, model: String) {
         val systemPrompt = aiEngine.buildSystemPrompt(_uiState.value.currentMood, userPrefs.value.language)
         geminiLiveClient.setMuted(_uiState.value.isMuted)
+        audioRecordManager.isInputMuted = _uiState.value.isMuted
+
+        // Start persistent PCM16 @ 16kHz microphone capture FIRST so initial setup frames queue safely
+        audioRecordManager.onPcmAudioFrame = { pcmChunk ->
+            geminiLiveClient.sendPcmAudioChunk(pcmChunk)
+        }
+        val micStarted = audioRecordManager.startListening()
+        if (!micStarted) {
+            MahiVoiceForegroundService.stop(getApplication())
+            _uiState.value = _uiState.value.copy(
+                visualState = AssistantVisualState.ERROR,
+                isGeminiLiveActive = false,
+                isMicActivelyCapturing = false,
+                errorCategory = ApiErrorCategory.CONNECTION_FAILED,
+                errorMessage = audioRecordManager.lastCaptureError.value
+                    ?: "Microphone unavailable. Check Android microphone permission."
+            )
+            return
+        }
 
         geminiLiveClient.connect(
             apiKey = apiKey,
@@ -295,19 +431,33 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
             systemPrompt = systemPrompt,
             callbacks = object : GeminiLiveCallbacks {
                 override fun onSetupComplete() {
-                    audioRecordManager.onPcmAudioFrame = { pcmChunk ->
-                        geminiLiveClient.sendPcmAudioChunk(pcmChunk)
-                    }
-                    audioRecordManager.startListening()
                     _uiState.value = _uiState.value.copy(
                         visualState = AssistantVisualState.LISTENING,
                         isGeminiLiveActive = true,
-                        liveAssistantText = "Gemini Live audio connected ($model). Talk to me!"
+                        isMicActivelyCapturing = audioRecordManager.isActivelyCapturing(),
+                        reconnectMessage = null,
+                        errorMessage = null,
+                        liveAssistantText = "Gemini Live audio active ($model). Continuous listening ON!"
                     )
                 }
 
                 override fun onUserTranscript(text: String) {
                     _uiState.value = _uiState.value.copy(liveUserText = text)
+                    if (userPrefs.value.autoLanguageDetection) {
+                        val detected = VoiceCommandRouter.detectLanguageFromUtterance(text, userPrefs.value.language)
+                        if (detected != userPrefs.value.language) {
+                            setLanguage(detected)
+                        }
+                    }
+                    // Immediate voice-triggered local command / STOP interception
+                    viewModelScope.launch {
+                        val routed = VoiceCommandRouter.parseCommand(text)
+                        if (routed is RoutedVoiceCommand.StopEverything) {
+                            executeRoutedVoiceCommand(routed)
+                        } else if (routed is RoutedVoiceCommand.ExecuteGesture || routed is RoutedVoiceCommand.LaunchApp) {
+                            executeRoutedVoiceCommand(routed)
+                        }
+                    }
                 }
 
                 override fun onAssistantTranscript(text: String) {
@@ -317,6 +467,13 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 override fun onAssistantSpeakingChanged(isSpeaking: Boolean) {
                     val current = _uiState.value.visualState
                     if (current == AssistantVisualState.DISCONNECTED || current == AssistantVisualState.ERROR) return
+
+                    if (!isSpeaking && !_uiState.value.isContinuousMode && geminiLiveClient.connectionPhase.value != GeminiLiveConnectionPhase.RECONNECTING) {
+                        // Continuous mode explicitly OFF -> stop listening after reply finishes
+                        stopSession()
+                        return
+                    }
+
                     _uiState.value = _uiState.value.copy(
                         visualState = if (isSpeaking) AssistantVisualState.SPEAKING else AssistantVisualState.LISTENING
                     )
@@ -345,13 +502,24 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                     _uiState.value = _uiState.value.copy(visualState = AssistantVisualState.LISTENING)
                 }
 
+                override fun onReconnecting(attempt: Int, maxAttempts: Int, reason: String) {
+                    _uiState.value = _uiState.value.copy(
+                        visualState = AssistantVisualState.RECONNECTING,
+                        reconnectMessage = "Reconnecting Live session ($attempt/$maxAttempts)...",
+                        errorMessage = null
+                    )
+                }
+
                 override fun onError(error: GeminiLiveError) {
                     // STRICT RULE: Never silently fall back from Gemini Live audio-to-audio to text-only mode!
                     audioRecordManager.onPcmAudioFrame = null
                     audioRecordManager.stopListening()
+                    MahiVoiceForegroundService.stop(getApplication())
                     _uiState.value = _uiState.value.copy(
                         visualState = AssistantVisualState.ERROR,
                         isGeminiLiveActive = false,
+                        isMicActivelyCapturing = false,
+                        reconnectMessage = null,
                         errorCategory = error.category,
                         errorMessage = error.message,
                         waveformBars = List(32) { 0.06f }
@@ -361,9 +529,12 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 override fun onDisconnected() {
                     audioRecordManager.onPcmAudioFrame = null
                     audioRecordManager.stopListening()
+                    MahiVoiceForegroundService.stop(getApplication())
                     _uiState.value = _uiState.value.copy(
                         visualState = AssistantVisualState.DISCONNECTED,
                         isGeminiLiveActive = false,
+                        isMicActivelyCapturing = false,
+                        reconnectMessage = null,
                         waveformBars = List(32) { 0.06f }
                     )
                 }
@@ -375,16 +546,30 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         viewModelScope.launch {
             try {
                 audioRecordManager.onPcmAudioFrame = null
-                audioRecordManager.startListening()
-                speechRecognitionManager.startListening()
+                val micOk = audioRecordManager.startListening()
+                speechRecognitionManager.isContinuousMode = _uiState.value.isContinuousMode && !userPrefs.value.pushToTalkMode
+                val sttOk = speechRecognitionManager.startListening()
+                if (!micOk && !sttOk) {
+                    MahiVoiceForegroundService.stop(getApplication())
+                    _uiState.value = _uiState.value.copy(
+                        visualState = AssistantVisualState.ERROR,
+                        isMicActivelyCapturing = false,
+                        errorCategory = ApiErrorCategory.CONNECTION_FAILED,
+                        errorMessage = "Microphone and speech recognition unavailable on this device."
+                    )
+                    return@launch
+                }
                 _uiState.value = _uiState.value.copy(
                     visualState = AssistantVisualState.LISTENING,
-                    isGeminiLiveActive = false
+                    isGeminiLiveActive = false,
+                    isMicActivelyCapturing = micOk || sttOk
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start voice session", e)
+                MahiVoiceForegroundService.stop(getApplication())
                 _uiState.value = _uiState.value.copy(
                     visualState = AssistantVisualState.ERROR,
+                    isMicActivelyCapturing = false,
                     errorCategory = ApiErrorCategory.CONNECTION_FAILED,
                     errorMessage = "Microphone or speech recognition service unavailable."
                 )
@@ -399,9 +584,12 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         speechRecognitionManager.stopListening()
         speechSynthesizer.stop()
         geminiLiveClient.disconnect()
+        MahiVoiceForegroundService.stop(getApplication())
         _uiState.value = _uiState.value.copy(
             visualState = AssistantVisualState.DISCONNECTED,
             isGeminiLiveActive = false,
+            isMicActivelyCapturing = false,
+            reconnectMessage = null,
             waveformBars = List(32) { 0.06f }
         )
     }
@@ -426,6 +614,23 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         if (query.isBlank()) return
         triggerHaptic()
 
+        // Auto-detect Urdu / Roman Urdu / English if enabled
+        if (userPrefs.value.autoLanguageDetection) {
+            val detected = VoiceCommandRouter.detectLanguageFromUtterance(query, userPrefs.value.language)
+            if (detected != userPrefs.value.language) {
+                setLanguage(detected)
+            }
+        }
+
+        // Handle immediate deterministic Android automation commands (STOP, TikTok/FB/YouTube, gestures, calls)
+        val routed = VoiceCommandRouter.parseCommand(query)
+        if (routed != null) {
+            viewModelScope.launch {
+                executeRoutedVoiceCommand(routed, originalUtterance = query)
+            }
+            return
+        }
+
         val state = apiManagerState.value
         val activeProvider = state.activeProvider
         val activeConfig = state.activeConfig
@@ -438,7 +643,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
             return
         }
 
-        // Strict requirement: If Gemini Live mode is configured, never silently substitute a text-only mode
+        // Strict requirement: Never silently substitute text-only mode if Live audio model is selected
         if (activeProvider == AiProvider.GEMINI && isGeminiLiveAudioModel(activeConfig.selectedModel)) {
             if (apiKey.isNullOrBlank()) {
                 _uiState.value = _uiState.value.copy(
@@ -448,7 +653,6 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 )
                 return
             }
-            // Start live audio session and deliver prompt once setup completes
             startSession()
             return
         }
@@ -538,8 +742,95 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
+    private suspend fun executeRoutedVoiceCommand(
+        routed: RoutedVoiceCommand,
+        originalUtterance: String = ""
+    ) {
+        val outcomeText: String
+        val cardTitle: String
+        var cardUrl: String? = null
+        var ok = true
+
+        when (routed) {
+            RoutedVoiceCommand.StopEverything -> {
+                MahiAccessibilityService.stopAllGestures()
+                autonomousAgentEngine.stop()
+                cardTitle = "Stopped Immediately"
+                outcomeText = "Stopped all gestures and running automation."
+            }
+            is RoutedVoiceCommand.LaunchApp -> {
+                val res = appLauncherManager.launchApp(routed.appName, openStoreOrWebIfMissing = true)
+                ok = res.success
+                cardTitle = res.appName
+                cardUrl = res.fallbackUrl
+                outcomeText = res.message
+                if (ok && routed.followUpGesture != null) {
+                    delay(1100L)
+                    MahiAccessibilityService.executeGestureIntent(routed.followUpGesture)
+                }
+            }
+            is RoutedVoiceCommand.SearchYouTube -> {
+                val res = appLauncherManager.openYouTubeSearch(routed.query)
+                ok = res.success
+                cardTitle = "YouTube: ${routed.query}"
+                cardUrl = res.fallbackUrl
+                outcomeText = res.message
+            }
+            is RoutedVoiceCommand.ExecuteGesture -> {
+                val gOut = MahiAccessibilityService.executeGestureIntent(routed.gesture)
+                ok = gOut.success
+                cardTitle = routed.gesture.actionName.replace('_', ' ')
+                outcomeText = gOut.message
+            }
+            is RoutedVoiceCommand.PlaceCall -> {
+                val goal = if (originalUtterance.isNotBlank()) originalUtterance else "Call ${routed.target}"
+                val step = AgentPlanStep(
+                    stepNumber = 1,
+                    title = "Place call to ${routed.target}",
+                    actionType = AgentActionType.MAKE_CALL,
+                    param = routed.target,
+                    sensitiveCategory = SensitiveCategory.CALL
+                )
+                cardTitle = "Call Confirmation"
+                outcomeText = "Review call approval in Agent / Calls"
+                _requestedTab.value = "AGENT"
+                autonomousAgentEngine.executePlan(goal, listOf(step), viewModelScope)
+            }
+            RoutedVoiceCommand.AnswerActiveCall -> {
+                ok = MahiInCallService.answerIncomingCall(useSpeakerphoneBridge = false)
+                cardTitle = "Answer Call"
+                outcomeText = if (ok) "Answered incoming call" else "No active ringing call or Default Dialer role required."
+            }
+            RoutedVoiceCommand.RejectActiveCall -> {
+                ok = MahiInCallService.rejectOrEndCall()
+                cardTitle = "Reject Call"
+                outcomeText = if (ok) "Rejected incoming call" else "No active call or Telecom role required."
+            }
+            RoutedVoiceCommand.EndActiveCall -> {
+                ok = MahiInCallService.rejectOrEndCall()
+                cardTitle = "End Call"
+                outcomeText = if (ok) "Ended active call" else "No active call found."
+            }
+        }
+
+        _uiState.value = _uiState.value.copy(
+            liveUserText = originalUtterance.ifBlank { _uiState.value.liveUserText },
+            liveAssistantText = outcomeText,
+            lastExecutedTool = ToolExecutionResult(
+                actionName = cardTitle,
+                displayTitle = cardTitle,
+                message = outcomeText,
+                linkUrl = cardUrl,
+                isSuccess = ok
+            )
+        )
+        if (!_uiState.value.isMuted && !_uiState.value.isGeminiLiveActive) {
+            speakText(outcomeText)
+        }
+    }
+
     private fun onAssistantDoneSpeaking() {
-        if (_uiState.value.isContinuousMode && !_uiState.value.isGeminiLiveActive) {
+        if (_uiState.value.isContinuousMode && !userPrefs.value.pushToTalkMode && !_uiState.value.isGeminiLiveActive) {
             viewModelScope.launch {
                 _uiState.value = _uiState.value.copy(
                     visualState = AssistantVisualState.LISTENING,
@@ -551,6 +842,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         } else if (!_uiState.value.isGeminiLiveActive) {
             _uiState.value = _uiState.value.copy(
                 visualState = AssistantVisualState.DISCONNECTED,
+                isMicActivelyCapturing = false,
                 waveformBars = List(32) { 0.06f }
             )
         }
@@ -664,7 +956,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         return true
     }
 
-    // --- Existing Persona & Voice Controls ---
+    // --- Persona & Voice Controls ---
 
     fun setMood(mood: MahiMood) {
         triggerHaptic()
@@ -687,14 +979,24 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
     fun toggleContinuousMode() {
         val next = !_uiState.value.isContinuousMode
-        speechRecognitionManager.isContinuousMode = next
+        speechRecognitionManager.isContinuousMode = next && !userPrefs.value.pushToTalkMode
         _uiState.value = _uiState.value.copy(isContinuousMode = next)
+    }
+
+    fun setPushToTalkMode(enabled: Boolean) {
+        preferencesStore.setPushToTalkMode(enabled)
+        speechRecognitionManager.isContinuousMode = _uiState.value.isContinuousMode && !enabled
+    }
+
+    fun setAutoLanguageDetection(enabled: Boolean) {
+        preferencesStore.setAutoLanguageDetection(enabled)
     }
 
     fun toggleMute() {
         val next = !_uiState.value.isMuted
         if (next) speechSynthesizer.stop()
         geminiLiveClient.setMuted(next)
+        audioRecordManager.isInputMuted = next
         _uiState.value = _uiState.value.copy(isMuted = next)
     }
 
@@ -722,6 +1024,8 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         preferencesStore.setLanguage(language)
         aiEngine.currentLanguage = language
         speechSynthesizer.setSpeechLanguage(language.ttsLanguageTag)
+        speechRecognitionManager.preferredLanguageTag = language.ttsLanguageTag
+        geminiLiveClient.updateSystemInstruction(aiEngine.buildSystemPrompt(_uiState.value.currentMood, language))
     }
 
     fun setThemeMode(themeMode: AppThemeMode) {
@@ -736,7 +1040,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         speechSynthesizer.speak(text)
     }
 
-    // --- Neural Lens (Live AI Camera Vision & OCR) ---
+    // --- Neural Lens ---
 
     fun askVisionQuestion(question: String) {
         val state = apiManagerState.value
@@ -790,7 +1094,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
-    // --- AI Search Engine & Deep Research Agent + PDF Export ---
+    // --- AI Search & Deep Research ---
 
     fun runAiSearch(query: String) {
         if (query.isBlank()) return
@@ -857,7 +1161,28 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
-    // --- Screen Intelligence & Autonomous Android Agent ---
+    // --- Screen Intelligence, App Launcher & Autonomous Android Agent ---
+
+    fun refreshInstalledApps(searchQuery: String = "") {
+        viewModelScope.launch(Dispatchers.IO) {
+            val apps = appLauncherManager.getInstalledLaunchableApps(searchQuery)
+            _installedApps.value = apps
+        }
+    }
+
+    fun launchAppDirect(appNameOrPackage: String): AppLaunchResult {
+        val result = appLauncherManager.launchApp(appNameOrPackage, openStoreOrWebIfMissing = true)
+        _uiState.value = _uiState.value.copy(
+            lastExecutedTool = ToolExecutionResult(
+                actionName = "openApp",
+                displayTitle = result.appName,
+                message = result.message,
+                linkUrl = result.fallbackUrl,
+                isSuccess = result.success
+            )
+        )
+        return result
+    }
 
     fun runAgentGoal(goal: String) {
         if (goal.isBlank()) return
@@ -882,6 +1207,11 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
     fun stopAgent() {
         autonomousAgentEngine.stop()
+        MahiAccessibilityService.stopAllGestures()
+    }
+
+    fun stopAllGestures() {
+        MahiAccessibilityService.stopAllGestures()
     }
 
     fun respondToSensitiveConfirmation(approved: Boolean) {
@@ -939,6 +1269,137 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
     fun clearAutomationHistory() {
         autonomousAgentEngine.historyStore.clear()
+        MahiAccessibilityService.clearGestureHistory()
+    }
+
+    // --- Telecom Call Automation & AI Call Assistant ---
+
+    fun refreshCallCapabilities() {
+        CallAutomationRepository.refreshCapabilities(getApplication())
+    }
+
+    fun placeOutgoingCall(target: String) {
+        val (ok, msg) = MahiInCallService.placeOutgoingCall(getApplication(), target)
+        _callFeedback.value = if (ok) msg else "Call failed: $msg"
+    }
+
+    fun answerIncomingCall(useSpeakerphoneAi: Boolean = false) {
+        val ok = MahiInCallService.answerIncomingCall(useSpeakerphoneBridge = useSpeakerphoneAi)
+        if (ok && useSpeakerphoneAi) {
+            val greeting = CallAutomationRepository.buildAiDisclosureGreeting(activeCall.value.callerDisplayName)
+            CallAutomationRepository.updateActiveCall {
+                it.copy(
+                    isSpeakerphone = true,
+                    aiPhase = AiCallAssistantPhase.DISCLOSING_AI_AND_ASKING_REASON,
+                    aiDialogueLog = it.aiDialogueLog + "Mahi (Disclosed AI): $greeting"
+                )
+            }
+            val voice = callPrefs.value.assistantVoice
+            speechSynthesizer.pitch = voice.pitch
+            speechSynthesizer.speechRate = voice.speed
+            speechSynthesizer.speak(greeting)
+        }
+        _callFeedback.value = if (ok) {
+            if (useSpeakerphoneAi) "Answered call on Speakerphone with disclosed AI Assistant." else "Call answered."
+        } else {
+            "No incoming call bound — grant Default Phone App role to answer in-app."
+        }
+    }
+
+    fun rejectOrEndCall() {
+        val ok = MahiInCallService.rejectOrEndCall()
+        speechSynthesizer.stop()
+        _callFeedback.value = if (ok) "Call ended/rejected." else "Grant Default Phone App role or Answer Calls permission."
+    }
+
+    fun toggleCallMute() {
+        val next = !activeCall.value.isMuted
+        val ok = MahiInCallService.setCallMuted(next)
+        if (!ok) _callFeedback.value = "Default Phone App role required to mute cellular call."
+    }
+
+    fun toggleCallSpeakerphone() {
+        val next = !activeCall.value.isSpeakerphone
+        val ok = MahiInCallService.setSpeakerphoneEnabled(next)
+        if (!ok) _callFeedback.value = "Default Phone App role required to toggle speakerphone."
+    }
+
+    fun takeOverCallManually() {
+        speechSynthesizer.stop()
+        geminiLiveClient.interruptPlayback()
+        CallAutomationRepository.updateActiveCall {
+            it.copy(
+                aiPhase = AiCallAssistantPhase.MANUAL_TAKEOVER_ACTIVE,
+                aiDialogueLog = it.aiDialogueLog + "[Manual Takeover Activated — AI Assistant silenced; owner in full control]"
+            )
+        }
+        _callFeedback.value = "Manual takeover active — AI silenced."
+    }
+
+    fun processCallerUtteranceWithAiAssistant(callerStatement: String) {
+        if (callerStatement.isBlank()) return
+        val prefs = callPrefs.value
+        val eval = CallAutomationRepository.evaluateCallerMessageSafetyAndUrgency(callerStatement, prefs)
+        CallAutomationRepository.updateActiveCall {
+            it.copy(
+                isUrgent = it.isUrgent || eval.isUrgent,
+                callerReasonSummary = callerStatement.take(120),
+                aiPhase = if (eval.shouldSuggestTakeover) AiCallAssistantPhase.URGENCY_ALERT_HANDOVER else AiCallAssistantPhase.ACTIVE_SPEAKERPHONE_ASSIST,
+                aiDialogueLog = it.aiDialogueLog + "Caller: $callerStatement" + "Mahi (AI): ${eval.replyText}"
+            )
+        }
+        if (eval.isUrgent) {
+            CallAutomationRepository.notifyImportantCall(
+                getApplication(),
+                "Important Call — Manual Takeover Ready",
+                callerStatement
+            )
+        }
+        val voice = prefs.assistantVoice
+        speechSynthesizer.pitch = voice.pitch
+        speechSynthesizer.speechRate = voice.speed
+        speechSynthesizer.speak(eval.replyText)
+        if (eval.shouldDisconnectSpam) {
+            MahiInCallService.rejectOrEndCall()
+        }
+    }
+
+    fun updateCallPrefs(transform: (CallAutomationPrefs) -> CallAutomationPrefs) {
+        CallAutomationRepository.updatePrefs(getApplication(), transform)
+    }
+
+    fun addTrustedContact(name: String, phone: String) {
+        if (phone.isBlank()) return
+        updateCallPrefs { cur ->
+            cur.copy(trustedContacts = cur.trustedContacts + CallRuleContact(name = name.ifBlank { phone }, phoneNumber = phone.trim()))
+        }
+    }
+
+    fun removeTrustedContact(id: String) {
+        updateCallPrefs { cur ->
+            cur.copy(trustedContacts = cur.trustedContacts.filterNot { it.id == id })
+        }
+    }
+
+    fun addBlockedCaller(name: String, phone: String, reason: String = "User rule") {
+        if (phone.isBlank()) return
+        updateCallPrefs { cur ->
+            cur.copy(blockedCallers = cur.blockedCallers + CallRuleContact(name = name.ifBlank { phone }, phoneNumber = phone.trim(), note = reason))
+        }
+    }
+
+    fun removeBlockedCaller(id: String) {
+        updateCallPrefs { cur ->
+            cur.copy(blockedCallers = cur.blockedCallers.filterNot { it.id == id })
+        }
+    }
+
+    fun clearCallHistory() {
+        CallAutomationRepository.clearHistory(getApplication())
+    }
+
+    fun dismissImportantCallAlert() {
+        CallAutomationRepository.clearImportantAlert()
     }
 
     private fun triggerHaptic() {
@@ -960,7 +1421,9 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         speechRecognitionManager.release()
         speechSynthesizer.release()
         geminiLiveClient.disconnect()
+        MahiVoiceForegroundService.stop(getApplication())
         neuralLensAnalyzer.close()
         autonomousAgentEngine.stop()
+        MahiAccessibilityService.stopAllGestures()
     }
 }

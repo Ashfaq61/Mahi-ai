@@ -1,5 +1,6 @@
 package com.example
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -24,6 +25,9 @@ class MainActivity : ComponentActivity() {
         // STEP 2: Edge-to-Edge full bleed immersive screen
         enableEdgeToEdge()
 
+        // Handle tel: / Dialer intent forwarding if launched via MahiDialerActivity
+        viewModel.handleIncomingAppIntent(intent)
+
         // STEP 3: Render Compose UI
         setContent {
             val prefs by viewModel.userPrefs.collectAsStateWithLifecycle()
@@ -31,5 +35,11 @@ class MainActivity : ComponentActivity() {
                 MahiScreen(viewModel = viewModel)
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        viewModel.handleIncomingAppIntent(intent)
     }
 }

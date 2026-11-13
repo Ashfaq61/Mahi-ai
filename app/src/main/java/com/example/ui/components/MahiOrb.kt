@@ -102,6 +102,7 @@ fun MahiOrb(
         AssistantVisualState.LISTENING -> CyberCyan
         AssistantVisualState.THINKING -> NeonViolet
         AssistantVisualState.SPEAKING -> NeonMagenta
+        AssistantVisualState.RECONNECTING -> Color(0xFFF59E0B)
         AssistantVisualState.ERROR -> Color(0xFFEF4444)
     }
 
@@ -111,6 +112,7 @@ fun MahiOrb(
         AssistantVisualState.LISTENING -> NeonMagenta
         AssistantVisualState.THINKING -> CyberCyan
         AssistantVisualState.SPEAKING -> NeonViolet
+        AssistantVisualState.RECONNECTING -> CyberCyan
         AssistantVisualState.ERROR -> Color(0xFFB91C1C)
     }
 
@@ -207,6 +209,7 @@ fun MahiOrb(
                 AssistantVisualState.LISTENING -> Icons.Default.Mic
                 AssistantVisualState.THINKING -> Icons.Default.Mic
                 AssistantVisualState.SPEAKING -> Icons.Default.VolumeUp
+                AssistantVisualState.RECONNECTING -> Icons.Default.Mic
                 AssistantVisualState.ERROR -> Icons.Default.MicOff
             }
 

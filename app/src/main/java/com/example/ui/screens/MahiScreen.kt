@@ -9,6 +9,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,17 +28,21 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -59,6 +64,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -80,6 +86,7 @@ import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.CyberEmerald
 import com.example.ui.theme.NeonMagenta
 import com.example.ui.theme.NeonViolet
+import com.example.ui.theme.WarningAmber
 import com.example.viewmodel.AssistantVisualState
 import com.example.viewmodel.MahiAssistantViewModel
 import kotlin.random.Random
@@ -88,7 +95,8 @@ enum class MahiHomeTab(val label: String, val tag: String) {
     VOICE("Voice", "nav_tab_voice"),
     LENS("Lens", "nav_tab_lens"),
     RESEARCH("Research", "nav_tab_research"),
-    AGENT("Agent", "nav_tab_agent")
+    AGENT("Agent", "nav_tab_agent"),
+    CALLS("Calls", "nav_tab_calls")
 }
 
 @Composable
@@ -118,6 +126,19 @@ fun MahiScreen(
     val pendingConfirmation by viewModel.pendingSensitiveConfirmation.collectAsStateWithLifecycle()
     val automationHistory by viewModel.automationHistory.collectAsStateWithLifecycle()
     val screenAiAnalysis by viewModel.screenAiAnalysis.collectAsStateWithLifecycle()
+    val installedApps by viewModel.installedApps.collectAsStateWithLifecycle()
+    val gestureStatus by viewModel.gestureStatus.collectAsStateWithLifecycle()
+    val isContinuousScrolling by viewModel.isContinuousScrolling.collectAsStateWithLifecycle()
+    val gestureHistory by viewModel.gestureHistory.collectAsStateWithLifecycle()
+
+    val callPrefs by viewModel.callPrefs.collectAsStateWithLifecycle()
+    val activeCall by viewModel.activeCall.collectAsStateWithLifecycle()
+    val callHistory by viewModel.callHistory.collectAsStateWithLifecycle()
+    val callCapabilities by viewModel.callCapabilities.collectAsStateWithLifecycle()
+    val importantCallAlert by viewModel.importantCallAlert.collectAsStateWithLifecycle()
+    val callFeedback by viewModel.callFeedback.collectAsStateWithLifecycle()
+    val requestedTab by viewModel.requestedTab.collectAsStateWithLifecycle()
+    val pendingDialNumber by viewModel.pendingDialNumber.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val colors = MaterialTheme.colorScheme
@@ -146,6 +167,13 @@ fun MahiScreen(
     var showApiSettingsScreen by remember { mutableStateOf(false) }
     var showTextInput by remember { mutableStateOf(false) }
     var typedQuery by remember { mutableStateOf("") }
+
+    LaunchedEffect(requestedTab) {
+        if (requestedTab == "CALLS") {
+            selectedTab = MahiHomeTab.CALLS
+            viewModel.consumeRequestedTab()
+        }
+    }
 
     // Auto-request mic permission on first launch if not granted
     LaunchedEffect(Unit) {
@@ -195,6 +223,7 @@ fun MahiScreen(
                         MahiHomeTab.LENS -> Icons.Default.CenterFocusStrong
                         MahiHomeTab.RESEARCH -> Icons.Default.Search
                         MahiHomeTab.AGENT -> Icons.Default.SmartToy
+                        MahiHomeTab.CALLS -> Icons.Default.Call
                     }
                     NavigationBarItem(
                         selected = selectedTab == tab,
@@ -326,6 +355,16 @@ fun MahiScreen(
                                 )
                             }
 
+                            if (!uiState.backgroundMicNotice.isNullOrBlank()) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = uiState.backgroundMicNotice.orEmpty(),
+                                    color = WarningAmber,
+                                    fontSize = 11.sp,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+
                             Spacer(modifier = Modifier.height(8.dp))
 
                             ActionExecutionCard(
@@ -391,17 +430,22 @@ fun MahiScreen(
                                         viewModel.toggleSession()
                                     }
                                 },
-                                orbSize = 192.dp
+                                orbSize = 186.dp
                             )
 
-                            Spacer(modifier = Modifier.height(14.dp))
+                            Spacer(modifier = Modifier.height(10.dp))
 
                             val (statusLabel, statusDetail) = when (uiState.visualState) {
                                 AssistantVisualState.DISCONNECTED -> "Tap Orb to Start" to "Continuous real-time voice mode"
                                 AssistantVisualState.CONNECTING -> "Connecting..." to "Linking with ${apiState.activeProvider.shortName}"
-                                AssistantVisualState.LISTENING -> "Listening to you..." to "Speak casually, I'm all ears"
-                                AssistantVisualState.THINKING -> "Thinking..." to "Cooking up a witty answer"
-                                AssistantVisualState.SPEAKING -> "Mahi is speaking" to "Tap orb anytime to interrupt"
+                                AssistantVisualState.LISTENING -> if (uiState.isMicActivelyCapturing) {
+                                    "Listening to you..." to "Mic active • speak Urdu, Roman Urdu, or English"
+                                } else {
+                                    "Session Ready" to "Tap Push-to-Talk or speak when mic starts"
+                                }
+                                AssistantVisualState.THINKING -> "Processing..." to "Preparing response & actions"
+                                AssistantVisualState.SPEAKING -> "Mahi is speaking" to "Speak or tap orb anytime to interrupt"
+                                AssistantVisualState.RECONNECTING -> "Reconnecting..." to (uiState.reconnectMessage ?: "Preserving Live conversation")
                                 AssistantVisualState.ERROR -> "Connection Error" to "Check API key, model, or network"
                             }
 
@@ -411,6 +455,7 @@ fun MahiScreen(
                                     AssistantVisualState.LISTENING -> CyberCyan
                                     AssistantVisualState.SPEAKING -> NeonMagenta
                                     AssistantVisualState.THINKING -> NeonViolet
+                                    AssistantVisualState.RECONNECTING -> WarningAmber
                                     else -> colors.onBackground
                                 },
                                 fontSize = 17.sp,
@@ -424,6 +469,71 @@ fun MahiScreen(
                                 fontSize = 12.sp,
                                 textAlign = TextAlign.Center
                             )
+
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            // Honest mic capture & live input level meter
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth(0.75f)
+                                    .testTag("mic_level_indicator_row")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Mic,
+                                    contentDescription = "Microphone Level",
+                                    tint = if (uiState.isMicActivelyCapturing) CyberEmerald else colors.onSurfaceVariant,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                LinearProgressIndicator(
+                                    progress = { uiState.micLevel.coerceIn(0f, 1f) },
+                                    color = if (uiState.isMicActivelyCapturing) CyberCyan else colors.onSurfaceVariant,
+                                    trackColor = colors.surfaceVariant,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(5.dp)
+                                        .clip(RoundedCornerShape(3.dp))
+                                )
+                                Text(
+                                    text = if (uiState.isMicActivelyCapturing) "LIVE" else "IDLE",
+                                    color = if (uiState.isMicActivelyCapturing) CyberEmerald else colors.onSurfaceVariant,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            if (userPrefs.pushToTalkMode) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(20.dp))
+                                        .background(NeonMagenta.copy(alpha = 0.2f))
+                                        .border(1.dp, NeonMagenta, RoundedCornerShape(20.dp))
+                                        .pointerInput(Unit) {
+                                            detectTapGestures(
+                                                onPress = {
+                                                    if (hasMicPermission) {
+                                                        viewModel.startPushToTalkHold()
+                                                        tryAwaitRelease()
+                                                        viewModel.releasePushToTalkHold()
+                                                    } else {
+                                                        permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                                    }
+                                                }
+                                            )
+                                        }
+                                        .padding(horizontal = 20.dp, vertical = 10.dp)
+                                        .testTag("push_to_talk_hold_button")
+                                ) {
+                                    Text(
+                                        text = "HOLD TO TALK (Push-to-Talk)",
+                                        color = NeonMagenta,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
                         }
 
                         // 3. Bottom Section: Visualizer, Subtitles, Prompt Chips, and Input Bar
@@ -434,18 +544,18 @@ fun MahiScreen(
                             LiveWaveformVisualizer(
                                 bars = uiState.waveformBars,
                                 visualState = uiState.visualState,
-                                height = 48.dp,
+                                height = 44.dp,
                                 modifier = Modifier.padding(horizontal = 8.dp)
                             )
 
-                            Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
 
                             SubtitleOverlay(
                                 visualState = uiState.visualState,
                                 userText = uiState.liveUserText,
                                 assistantText = uiState.liveAssistantText,
                                 showSubtitles = uiState.showSubtitles,
-                                modifier = Modifier.padding(bottom = 8.dp)
+                                modifier = Modifier.padding(bottom = 6.dp)
                             )
 
                             QuickPromptChips(
@@ -456,7 +566,7 @@ fun MahiScreen(
                                         viewModel.processUserQuery(prompt)
                                     }
                                 },
-                                modifier = Modifier.padding(bottom = 8.dp)
+                                modifier = Modifier.padding(bottom = 6.dp)
                             )
 
                             if (showTextInput) {
@@ -517,19 +627,57 @@ fun MahiScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(16.dp))
-                                            .background(colors.surfaceVariant)
-                                            .clickable { viewModel.toggleSubtitles() }
-                                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                                    ) {
-                                        Text(
-                                            text = if (uiState.showSubtitles) "Subtitles: ON" else "Subtitles: OFF",
-                                            color = if (uiState.showSubtitles) CyberCyan else colors.onSurfaceVariant,
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(16.dp))
+                                                .background(colors.surfaceVariant)
+                                                .clickable { viewModel.toggleSubtitles() }
+                                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                        ) {
+                                            Text(
+                                                text = if (uiState.showSubtitles) "Subtitles: ON" else "Subtitles: OFF",
+                                                color = if (uiState.showSubtitles) CyberCyan else colors.onSurfaceVariant,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(16.dp))
+                                                .background(colors.surfaceVariant)
+                                                .clickable { viewModel.setPushToTalkMode(!userPrefs.pushToTalkMode) }
+                                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                        ) {
+                                            Text(
+                                                text = if (userPrefs.pushToTalkMode) "PTT: ON" else "Continuous",
+                                                color = if (userPrefs.pushToTalkMode) NeonMagenta else CyberEmerald,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+
+                                        if (uiState.visualState != AssistantVisualState.DISCONNECTED || isContinuousScrolling) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(16.dp))
+                                                    .background(Color(0xFFDC2626).copy(alpha = 0.2f))
+                                                    .border(1.dp, Color(0xFFDC2626), RoundedCornerShape(16.dp))
+                                                    .clickable {
+                                                        viewModel.stopSession()
+                                                        viewModel.stopAllGestures()
+                                                    }
+                                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                                    .testTag("voice_emergency_stop_button")
+                                            ) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(Icons.Default.Stop, contentDescription = "Stop", tint = Color(0xFFEF4444), modifier = Modifier.size(12.dp))
+                                                    Spacer(modifier = Modifier.width(3.dp))
+                                                    Text("STOP", color = Color(0xFFEF4444), fontSize = 11.sp, fontWeight = FontWeight.Black)
+                                                }
+                                            }
+                                        }
                                     }
 
                                     IconButton(
@@ -591,6 +739,10 @@ fun MahiScreen(
                         pendingConfirmation = pendingConfirmation,
                         history = automationHistory,
                         screenAiAnalysis = screenAiAnalysis,
+                        installedApps = installedApps,
+                        gestureStatus = gestureStatus,
+                        isContinuousScrolling = isContinuousScrolling,
+                        gestureHistory = gestureHistory,
                         onRunGoal = { viewModel.runAgentGoal(it) },
                         onStopAgent = { viewModel.stopAgent() },
                         onRespondConfirmation = { viewModel.respondToSensitiveConfirmation(it) },
@@ -598,7 +750,39 @@ fun MahiScreen(
                         onSendAuthorizedWhatsAppReply = { key, sender, replyText ->
                             viewModel.sendAuthorizedWhatsAppReply(key, sender, replyText)
                         },
-                        onClearHistory = { viewModel.clearAutomationHistory() }
+                        onClearHistory = { viewModel.clearAutomationHistory() },
+                        onLaunchApp = { viewModel.launchAppDirect(it) },
+                        onSearchInstalledApps = { viewModel.refreshInstalledApps(it) },
+                        onStopGestures = { viewModel.stopAllGestures() },
+                        onClearGestureHistory = { viewModel.clearAutomationHistory() }
+                    )
+                }
+
+                MahiHomeTab.CALLS -> {
+                    CallsAndSettingsScreen(
+                        callPrefs = callPrefs,
+                        activeCall = activeCall,
+                        callHistory = callHistory,
+                        capabilities = callCapabilities,
+                        importantAlert = importantCallAlert,
+                        callFeedback = callFeedback,
+                        prefilledDialNumber = pendingDialNumber,
+                        onConsumePrefilledDial = { viewModel.clearPendingDialNumber() },
+                        onRefreshCapabilities = { viewModel.refreshCallCapabilities() },
+                        onPlaceCall = { viewModel.placeOutgoingCall(it) },
+                        onAnswerCall = { useSpeakerAi -> viewModel.answerIncomingCall(useSpeakerAi) },
+                        onRejectOrEndCall = { viewModel.rejectOrEndCall() },
+                        onToggleMute = { viewModel.toggleCallMute() },
+                        onToggleSpeaker = { viewModel.toggleCallSpeakerphone() },
+                        onManualTakeover = { viewModel.takeOverCallManually() },
+                        onProcessCallerUtterance = { viewModel.processCallerUtteranceWithAiAssistant(it) },
+                        onUpdatePrefs = { transform -> viewModel.updateCallPrefs(transform) },
+                        onAddTrusted = { name, phone -> viewModel.addTrustedContact(name, phone) },
+                        onRemoveTrusted = { id -> viewModel.removeTrustedContact(id) },
+                        onAddBlocked = { name, phone -> viewModel.addBlockedCaller(name, phone) },
+                        onRemoveBlocked = { id -> viewModel.removeBlockedCaller(id) },
+                        onClearHistory = { viewModel.clearCallHistory() },
+                        onDismissAlert = { viewModel.dismissImportantCallAlert() }
                     )
                 }
             }
@@ -610,6 +794,8 @@ fun MahiScreen(
                     currentLanguage = userPrefs.language,
                     currentThemeMode = userPrefs.themeMode,
                     isContinuousMode = uiState.isContinuousMode,
+                    isPushToTalkMode = userPrefs.pushToTalkMode,
+                    isAutoLanguageDetection = userPrefs.autoLanguageDetection,
                     showSubtitles = uiState.showSubtitles,
                     voicePitch = uiState.voicePitch,
                     voiceSpeed = uiState.voiceSpeed,
@@ -623,6 +809,8 @@ fun MahiScreen(
                         viewModel.setMood(mood)
                     },
                     onContinuousToggle = { viewModel.toggleContinuousMode() },
+                    onPushToTalkToggle = { viewModel.setPushToTalkMode(it) },
+                    onAutoLanguageToggle = { viewModel.setAutoLanguageDetection(it) },
                     onSubtitlesToggle = { viewModel.toggleSubtitles() },
                     onPitchChanged = { viewModel.setVoicePitch(it) },
                     onSpeedChanged = { viewModel.setVoiceSpeed(it) },

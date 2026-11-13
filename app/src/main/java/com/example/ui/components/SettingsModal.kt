@@ -59,6 +59,8 @@ fun SettingsModal(
     currentLanguage: AppLanguage = AppLanguage.ENGLISH,
     currentThemeMode: AppThemeMode = AppThemeMode.DARK,
     isContinuousMode: Boolean,
+    isPushToTalkMode: Boolean = false,
+    isAutoLanguageDetection: Boolean = true,
     showSubtitles: Boolean,
     voicePitch: Float,
     voiceSpeed: Float,
@@ -70,6 +72,8 @@ fun SettingsModal(
     onThemeSelected: (AppThemeMode) -> Unit = {},
     onMoodSelected: (MahiMood) -> Unit,
     onContinuousToggle: () -> Unit,
+    onPushToTalkToggle: (Boolean) -> Unit = {},
+    onAutoLanguageToggle: (Boolean) -> Unit = {},
     onSubtitlesToggle: () -> Unit,
     onPitchChanged: (Float) -> Unit,
     onSpeedChanged: (Float) -> Unit,
@@ -384,6 +388,68 @@ fun SettingsModal(
                         checkedTrackColor = CyberCyan,
                         uncheckedTrackColor = colors.outline
                     )
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(colors.surfaceVariant)
+                    .padding(14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Push-to-Talk Mode",
+                        color = colors.onSurface,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Hold to talk instead of hands-free continuous capture",
+                        color = colors.onSurfaceVariant,
+                        fontSize = 11.sp
+                    )
+                }
+                Switch(
+                    checked = isPushToTalkMode,
+                    onCheckedChange = onPushToTalkToggle,
+                    modifier = Modifier.testTag("push_to_talk_switch")
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(colors.surfaceVariant)
+                    .padding(14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Auto Language Detection",
+                        color = colors.onSurface,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Match English, Roman Urdu, or Urdu automatically",
+                        color = colors.onSurfaceVariant,
+                        fontSize = 11.sp
+                    )
+                }
+                Switch(
+                    checked = isAutoLanguageDetection,
+                    onCheckedChange = onAutoLanguageToggle,
+                    modifier = Modifier.testTag("auto_language_switch")
                 )
             }
 

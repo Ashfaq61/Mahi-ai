@@ -27,9 +27,14 @@ enum class AgentActionType {
     SET_BRIGHTNESS,
     OPEN_SETTINGS,
     TAP_UI_ELEMENT,
+    DOUBLE_TAP_UI_ELEMENT,
     LONG_PRESS_UI_ELEMENT,
+    DRAG_DROP,
     SCROLL_SCREEN,
+    SCROLL_TO_EDGE,
+    CONTINUOUS_SCROLL,
     SWIPE_SCREEN,
+    STOP_GESTURES,
     READ_SCREEN,
     READ_WHATSAPP,
     SEND_WHATSAPP_REPLY,
@@ -302,13 +307,30 @@ Return ONLY a valid JSON array.
             val target = lower.replace("tap ", "").replace("click ", "").trim()
             addStep("Tap UI element '$target'", AgentActionType.TAP_UI_ELEMENT, target)
         }
-        if (lower.contains("scroll")) {
-            val forward = !lower.contains("up") && !lower.contains("back")
-            addStep(if (forward) "Scroll screen down" else "Scroll screen up", AgentActionType.SCROLL_SCREEN, forward.toString())
+        if (lower.contains("scroll") || lower.contains("swipe")) {
+            when {
+                lower.contains("bottom") || lower.contains("end") ->
+                    addStep("Scroll to bottom of page", AgentActionType.SCROLL_TO_EDGE, "bottom")
+                lower.contains("top") ->
+                    addStep("Scroll to top of page", AgentActionType.SCROLL_TO_EDGE, "top")
+                lower.contains("continuous") ->
+                    addStep("Continuous scroll", AgentActionType.CONTINUOUS_SCROLL, if (lower.contains("up")) "false" else "true")
+                lower.contains("left") ->
+                    addStep("Swipe left", AgentActionType.SWIPE_SCREEN, "LEFT")
+                lower.contains("right") ->
+                    addStep("Swipe right", AgentActionType.SWIPE_SCREEN, "RIGHT")
+                else -> {
+                    val forward = !lower.contains("up") && !lower.contains("back") && !lower.contains("upar")
+                    addStep(if (forward) "Scroll screen down" else "Scroll screen up", AgentActionType.SCROLL_SCREEN, forward.toString())
+                }
+            }
         }
         if (steps.isEmpty()) {
-            if (lower.startsWith("open ") || lower.startsWith("launch ")) {
-                val app = lower.removePrefix("open ").removePrefix("launch ").trim()
+            val matchedKnown = AppLauncherManager.matchKnownApp(goal)
+            if (matchedKnown != null) {
+                addStep("Launch ${matchedKnown.canonicalName}", AgentActionType.OPEN_APP, matchedKnown.canonicalName)
+            } else if (lower.startsWith("open ") || lower.startsWith("launch ") || lower.contains("kholo") || lower.contains("chalao")) {
+                val app = AppLauncherManager.normalizeAppQuery(goal)
                 addStep("Launch app '$app'", AgentActionType.OPEN_APP, app)
                 addStep("Inspect opened app screen", AgentActionType.READ_SCREEN)
             } else {
@@ -441,6 +463,14 @@ Return ONLY a valid JSON array.
                     )
                 }
             }
+            AgentActionType.DOUBLE_TAP_UI_ELEMENT -> {
+                if (!MahiAccessibilityService.isServiceEnabled(context)) {
+                    AutomationOutcome(false, "Enable Mahi Accessibility Service to double-tap elements.")
+                } else {
+                    val ok = MahiAccessibilityService.doubleTapElementOrCenter(step.param)
+                    AutomationOutcome(ok, if (ok) "Double-tapped '${step.param.ifBlank { "center" }}'" else "Double-tap failed")
+                }
+            }
             AgentActionType.LONG_PRESS_UI_ELEMENT -> {
                 if (!MahiAccessibilityService.isServiceEnabled(context)) {
                     AutomationOutcome(false, "Enable Mahi Accessibility Service to long press elements.")
@@ -449,15 +479,38 @@ Return ONLY a valid JSON array.
                     AutomationOutcome(ok, if (ok) "Long-pressed '${step.param}'" else "Element '${step.param}' not found")
                 }
             }
+            AgentActionType.DRAG_DROP -> {
+                if (!MahiAccessibilityService.isServiceEnabled(context)) {
+                    AutomationOutcome(false, "Enable Mahi Accessibility Service to drag and drop.")
+                } else {
+                    val ok = MahiAccessibilityService.dragBetweenElements(step.param, step.secondaryParam)
+                    AutomationOutcome(ok, if (ok) "Dragged '${step.param}' to '${step.secondaryParam}'" else "Drag targets unavailable")
+                }
+            }
             AgentActionType.SCROLL_SCREEN -> {
                 val forward = step.param.lowercase() != "false"
-                val ok = MahiAccessibilityService.scrollScreen(forward)
+                val speed = if (step.secondaryParam.equals("fast", ignoreCase = true)) GestureSpeed.FAST else GestureSpeed.NORMAL
+                val ok = MahiAccessibilityService.scrollScreen(forward, speed)
                 AutomationOutcome(ok, if (ok) "Scrolled screen" else "Accessibility Service required to scroll")
+            }
+            AgentActionType.SCROLL_TO_EDGE -> {
+                val toBottom = !step.param.equals("top", ignoreCase = true)
+                val ok = MahiAccessibilityService.scrollToEdge(toBottom)
+                AutomationOutcome(ok, if (ok) "Scrolling to ${if (toBottom) "bottom" else "top"}" else "Accessibility Service required")
+            }
+            AgentActionType.CONTINUOUS_SCROLL -> {
+                val forward = step.param.lowercase() != "false"
+                val ok = MahiAccessibilityService.startContinuousScroll(forward)
+                AutomationOutcome(ok, if (ok) "Continuous scroll active" else "Accessibility Service required")
             }
             AgentActionType.SWIPE_SCREEN -> {
                 val dir = runCatching { SwipeDirection.valueOf(step.param.uppercase()) }.getOrDefault(SwipeDirection.UP)
                 val ok = MahiAccessibilityService.swipeScreen(dir)
                 AutomationOutcome(ok, if (ok) "Swiped ${dir.name}" else "Accessibility Service required to swipe")
+            }
+            AgentActionType.STOP_GESTURES -> {
+                MahiAccessibilityService.stopAllGestures()
+                AutomationOutcome(true, "All gestures stopped")
             }
             AgentActionType.READ_SCREEN -> {
                 val snap = MahiAccessibilityService.refreshScreenSnapshot()

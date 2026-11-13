@@ -16,92 +16,27 @@ data class AutomationOutcome(
 
 class DeviceControlHelper(private val context: Context) {
 
+    val appLauncher = AppLauncherManager(context)
+
     private val audioManager: AudioManager?
         get() = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
 
     fun launchAppByName(appName: String): AutomationOutcome {
-        val clean = appName.trim().lowercase()
-        val knownPackages = mapOf(
-            "whatsapp" to "com.whatsapp",
-            "youtube" to "com.google.android.youtube",
-            "spotify" to "com.spotify.music",
-            "chrome" to "com.android.chrome",
-            "camera" to "com.android.camera2",
-            "settings" to "com.android.settings",
-            "maps" to "com.google.android.apps.maps"
-        )
-
-        val pm = context.packageManager
-        val matchedPkg = knownPackages.entries.firstOrNull { clean.contains(it.key) }?.value
-            ?: findInstalledLauncherPackage(pm, clean)
-
-        if (matchedPkg != null) {
-            val launchIntent = pm.getLaunchIntentForPackage(matchedPkg)?.apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            if (launchIntent != null) {
-                context.startActivity(launchIntent)
-                return AutomationOutcome(
-                    success = true,
-                    message = "Launched $appName ($matchedPkg)",
-                    verificationDetail = "Package launch intent dispatched for $matchedPkg"
-                )
-            }
-        }
-
-        // Web fallback for well-known services
-        val fallbackUrl = when {
-            clean.contains("youtube") -> "https://www.youtube.com"
-            clean.contains("whatsapp") -> "https://web.whatsapp.com"
-            clean.contains("spotify") -> "https://open.spotify.com"
-            else -> null
-        }
-        if (fallbackUrl != null) {
-            context.startActivity(
-                Intent(Intent.ACTION_VIEW, Uri.parse(fallbackUrl)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
-            return AutomationOutcome(
-                success = true,
-                message = "Opened $appName in browser",
-                verificationDetail = "Fallback URL opened: $fallbackUrl"
-            )
-        }
-
+        val result = appLauncher.launchApp(appName, openStoreOrWebIfMissing = true)
         return AutomationOutcome(
-            success = false,
-            message = "Could not find installed app matching '$appName'."
+            success = result.success,
+            message = result.message,
+            verificationDetail = result.verificationDetail
         )
-    }
-
-    private fun findInstalledLauncherPackage(pm: PackageManager, query: String): String? {
-        return try {
-            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-            val resolved = pm.queryIntentActivities(intent, 0)
-            resolved.firstOrNull { info ->
-                val label = info.loadLabel(pm).toString().lowercase()
-                label.contains(query) || info.activityInfo.packageName.lowercase().contains(query)
-            }?.activityInfo?.packageName
-        } catch (_: Exception) {
-            null
-        }
     }
 
     fun searchYouTube(query: String): AutomationOutcome {
-        val encoded = Uri.encode(query.trim())
-        val appUri = Uri.parse("https://www.youtube.com/results?search_query=$encoded")
-        val intent = Intent(Intent.ACTION_VIEW, appUri).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        return try {
-            context.startActivity(intent)
-            AutomationOutcome(
-                success = true,
-                message = "Opened YouTube search for '$query'",
-                verificationDetail = "YouTube results URI launched"
-            )
-        } catch (e: Exception) {
-            AutomationOutcome(false, e.localizedMessage ?: "Failed to launch YouTube search")
-        }
+        val result = appLauncher.openYouTubeSearch(query)
+        return AutomationOutcome(
+            success = result.success,
+            message = result.message,
+            verificationDetail = result.verificationDetail
+        )
     }
 
     fun getMediaVolumePercent(): Int {
