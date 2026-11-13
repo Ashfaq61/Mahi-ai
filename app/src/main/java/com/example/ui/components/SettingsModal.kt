@@ -17,8 +17,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -41,6 +43,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ai.MahiMood
+import com.example.api.AiProvider
+import com.example.api.ConnectionStatus
+import com.example.ui.theme.CyberBorderGlow
 import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.CyberDarkBackground
 import com.example.ui.theme.CyberDarkSurface
@@ -57,6 +62,10 @@ fun SettingsModal(
     showSubtitles: Boolean,
     voicePitch: Float,
     voiceSpeed: Float,
+    activeProvider: AiProvider = AiProvider.GEMINI,
+    activeModel: String = activeProvider.defaultModels.first(),
+    connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
+    onOpenApiSettings: () -> Unit = {},
     onMoodSelected: (MahiMood) -> Unit,
     onContinuousToggle: () -> Unit,
     onSubtitlesToggle: () -> Unit,
@@ -108,6 +117,66 @@ fun SettingsModal(
                         tint = TextSecondary
                     )
                 }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // API Keys & Providers Navigation Card
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xFF1A1238))
+                    .border(1.dp, CyberCyan.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
+                    .clickable {
+                        onDismiss()
+                        onOpenApiSettings()
+                    }
+                    .padding(14.dp)
+                    .testTag("settings_api_providers_button"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(NeonMagenta.copy(alpha = 0.16f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.VpnKey,
+                            contentDescription = "API Keys & Providers",
+                            tint = NeonMagenta,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "API Keys & Providers",
+                            color = TextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${activeProvider.shortName} • $activeModel",
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        ConnectionStatusPill(status = connectionStatus)
+                    }
+                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = "Open API Keys & Providers",
+                    tint = CyberCyan
+                )
             }
 
             Spacer(modifier = Modifier.height(20.dp))

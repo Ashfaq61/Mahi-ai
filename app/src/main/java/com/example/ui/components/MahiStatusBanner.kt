@@ -26,9 +26,11 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -40,9 +42,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ai.MahiMood
+import com.example.api.ConnectionStatus
 import com.example.ui.theme.CyberBorderGlow
 import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.CyberDarkSurface
+import com.example.ui.theme.CyberEmerald
 import com.example.ui.theme.NeonMagenta
 import com.example.ui.theme.NeonViolet
 import com.example.ui.theme.TextPrimary
@@ -55,9 +59,11 @@ fun MahiStatusBanner(
     currentMood: MahiMood,
     isContinuousMode: Boolean,
     isMuted: Boolean,
+    connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
     onMoodClick: () -> Unit,
     onContinuousToggle: () -> Unit,
     onMuteToggle: () -> Unit,
+    onApiSettingsClick: () -> Unit = {},
     onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -187,11 +193,48 @@ fun MahiStatusBanner(
                 )
             }
 
+            // Quick-Access API Keys & Providers Button
+            Box(contentAlignment = Alignment.TopEnd) {
+                IconButton(
+                    onClick = onApiSettingsClick,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .minimumInteractiveComponentSize()
+                        .testTag("home_api_settings_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.VpnKey,
+                        contentDescription = "API Keys & Providers",
+                        tint = when (connectionStatus) {
+                            ConnectionStatus.CONNECTED -> CyberEmerald
+                            ConnectionStatus.ERROR -> Color(0xFFEF4444)
+                            else -> CyberCyan
+                        },
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .padding(top = 6.dp, end = 6.dp)
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(
+                            when (connectionStatus) {
+                                ConnectionStatus.CONNECTED -> CyberEmerald
+                                ConnectionStatus.ERROR -> Color(0xFFEF4444)
+                                ConnectionStatus.TESTING -> CyberCyan
+                                ConnectionStatus.DISCONNECTED -> NeonMagenta
+                            }
+                        )
+                )
+            }
+
             // Audio & Persona Settings
             IconButton(
                 onClick = onSettingsClick,
                 modifier = Modifier
-                    .size(36.dp)
+                    .size(40.dp)
+                    .minimumInteractiveComponentSize()
                     .testTag("settings_button")
             ) {
                 Icon(

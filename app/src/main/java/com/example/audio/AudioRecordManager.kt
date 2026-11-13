@@ -43,6 +43,7 @@ class AudioRecordManager {
     val waveformBarsFlow: StateFlow<List<Float>> = _waveformBarsFlow.asStateFlow()
 
     private var isRecording = false
+    var onPcmAudioFrame: ((ByteArray) -> Unit)? = null
 
     @SuppressLint("MissingPermission")
     fun startListening() {
@@ -79,6 +80,17 @@ class AudioRecordManager {
                 while (isActive && isRecording) {
                     val readCount = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                     if (readCount > 0) {
+                        val pcmCallback = onPcmAudioFrame
+                        if (pcmCallback != null) {
+                            val pcmBytes = ByteArray(readCount * 2)
+                            for (i in 0 until readCount) {
+                                val sample = buffer[i].toInt()
+                                pcmBytes[i * 2] = (sample and 0xFF).toByte()
+                                pcmBytes[i * 2 + 1] = ((sample ushr 8) and 0xFF).toByte()
+                            }
+                            pcmCallback.invoke(pcmBytes)
+                        }
+
                         // Calculate RMS Amplitude
                         var sumSquares = 0.0
                         for (i in 0 until readCount) {

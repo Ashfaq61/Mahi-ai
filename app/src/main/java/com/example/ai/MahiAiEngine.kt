@@ -1,6 +1,11 @@
 package com.example.ai
 
 import android.util.Log
+import com.example.api.ApiErrorCategory
+import com.example.api.AiProvider
+import com.example.api.ProviderApiException
+import com.example.api.ProviderChatMessage
+import com.example.api.ProviderClient
 import com.example.tools.ToolAction
 import com.google.firebase.Firebase
 import com.google.firebase.ai.Chat
@@ -26,7 +31,9 @@ data class MahiResponse(
     val detectedMood: MahiMood? = null
 )
 
-class MahiAiEngine {
+class MahiAiEngine(
+    private val providerClient: ProviderClient = ProviderClient()
+) {
     companion object {
         private const val TAG = "MahiAiEngine"
     }
@@ -38,9 +45,10 @@ class MahiAiEngine {
     }
 
     private var chatSession: Chat? = null
+    private val conversationHistory = mutableListOf<ProviderChatMessage>()
     var currentMood: MahiMood = MahiMood.SASSY
 
-    private fun buildSystemPrompt(mood: MahiMood): String {
+    fun buildSystemPrompt(mood: MahiMood): String {
         return """
 You are Mahi: a 22-year-old, extremely confident, witty, and sassy female AI companion.
 You talk like a quick-witted, modern close girlfriend who is playfully teasing, confident, sharp, and charismatic.
@@ -78,6 +86,42 @@ Mahi: "A little bit. Don't let it get to your head though, I've got plenty of ot
         """.trimIndent()
     }
 
+    suspend fun sendMessageWithProvider(
+        provider: AiProvider,
+        apiKey: String?,
+        selectedModel: String,
+        baseUrl: String,
+        userMessage: String,
+        mood: MahiMood = currentMood
+    ): MahiResponse {
+        val cleanKey = apiKey?.trim().orEmpty()
+        if (cleanKey.isEmpty()) {
+            throw ProviderApiException(
+                ApiErrorCategory.MISSING_KEY,
+                "${provider.displayName} API key is not configured. Open API Keys & Providers to add your key."
+            )
+        }
+        if (mood != currentMood) {
+            currentMood = mood
+            conversationHistory.clear()
+        }
+
+        val reply = providerClient.generateChatReply(
+            provider = provider,
+            apiKey = cleanKey,
+            model = selectedModel,
+            baseUrl = baseUrl,
+            systemPrompt = buildSystemPrompt(mood),
+            history = conversationHistory.toList(),
+            userMessage = userMessage
+        )
+
+        conversationHistory.add(ProviderChatMessage("user", userMessage))
+        val parsed = parseResponse(reply)
+        conversationHistory.add(ProviderChatMessage("assistant", parsed.replyText))
+        return parsed
+    }
+
     private fun initChatSession() {
         chatSession = model.startChat(
             history = listOf(
@@ -94,7 +138,6 @@ Mahi: "A little bit. Don't let it get to your head though, I've got plenty of ot
         }
 
         try {
-            // Mandated: realistic 30-60s timeout for model inference
             val response = withTimeout(40_000L) {
                 chatSession?.sendMessage(userMessage)
             }
@@ -115,7 +158,6 @@ Mahi: "A little bit. Don't let it get to your head though, I've got plenty of ot
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Mahi AI inference error", e)
-            // Smart offline personality fallback
             getSmartFallback(userMessage, mood)
         }
     }

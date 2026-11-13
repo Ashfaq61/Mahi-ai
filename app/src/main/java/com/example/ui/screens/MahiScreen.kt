@@ -31,9 +31,13 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.VpnKey
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -61,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.api.ConnectionStatus
 import com.example.ui.components.ActionExecutionCard
 import com.example.ui.components.LiveWaveformVisualizer
 import com.example.ui.components.MahiOrb
@@ -68,9 +73,11 @@ import com.example.ui.components.MahiStatusBanner
 import com.example.ui.components.QuickPromptChips
 import com.example.ui.components.SettingsModal
 import com.example.ui.components.SubtitleOverlay
+import com.example.ui.theme.CyberBorderGlow
 import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.CyberDarkBackground
 import com.example.ui.theme.CyberDarkSurface
+import com.example.ui.theme.CyberEmerald
 import com.example.ui.theme.NeonMagenta
 import com.example.ui.theme.NeonViolet
 import com.example.ui.theme.TextPrimary
@@ -85,6 +92,7 @@ fun MahiScreen(
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val apiState by viewModel.apiManagerState.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     var hasMicPermission by remember {
@@ -106,6 +114,7 @@ fun MahiScreen(
     }
 
     var showSettingsModal by remember { mutableStateOf(false) }
+    var showApiSettingsScreen by remember { mutableStateOf(false) }
     var showTextInput by remember { mutableStateOf(false) }
     var typedQuery by remember { mutableStateOf("") }
 
@@ -114,6 +123,28 @@ fun MahiScreen(
         if (!hasMicPermission) {
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
+    }
+
+    if (showApiSettingsScreen) {
+        ApiProvidersScreen(
+            apiState = apiState,
+            onBack = { showApiSettingsScreen = false },
+            onSetActiveProvider = { viewModel.setActiveProvider(it) },
+            onAddKey = { provider, rawKey, label, testNow ->
+                viewModel.addAndOptionallyTestKey(provider, rawKey, label, testNow)
+            },
+            onUpdateKey = { provider, keyId, newRawKey, newLabel, testNow ->
+                viewModel.updateApiKey(provider, keyId, newRawKey, newLabel, testNow)
+            },
+            onDeleteKey = { provider, keyId -> viewModel.deleteApiKey(provider, keyId) },
+            onSelectKey = { provider, keyId -> viewModel.selectApiKey(provider, keyId) },
+            onTestKey = { provider, keyId -> viewModel.testApiKeyConnection(provider, keyId) },
+            onRevealKey = { keyId -> viewModel.revealDecryptedKey(keyId) },
+            onModelSelected = { provider, model -> viewModel.setProviderModel(provider, model) },
+            onBaseUrlChanged = { provider, url -> viewModel.setProviderBaseUrl(provider, url) },
+            modifier = modifier
+        )
+        return
     }
 
     Scaffold(
@@ -178,18 +209,97 @@ fun MahiScreen(
                         currentMood = uiState.currentMood,
                         isContinuousMode = uiState.isContinuousMode,
                         isMuted = uiState.isMuted,
+                        connectionStatus = apiState.activeConnectionStatus,
                         onMoodClick = { showSettingsModal = true },
                         onContinuousToggle = { viewModel.toggleContinuousMode() },
                         onMuteToggle = { viewModel.toggleMute() },
+                        onApiSettingsClick = { showApiSettingsScreen = true },
                         onSettingsClick = { showSettingsModal = true }
                     )
 
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Home Dashboard Quick-Access Active Provider Pill
+                    val activeKeyPresent = apiState.activeKey != null
+                    val pillColor = when {
+                        !activeKeyPresent -> NeonMagenta
+                        apiState.activeConnectionStatus == ConnectionStatus.CONNECTED -> CyberEmerald
+                        apiState.activeConnectionStatus == ConnectionStatus.ERROR -> Color(0xFFEF4444)
+                        else -> CyberCyan
+                    }
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(CyberDarkSurface.copy(alpha = 0.85f))
+                            .border(1.dp, pillColor.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                            .clickable { showApiSettingsScreen = true }
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .testTag("home_provider_status_pill"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.VpnKey,
+                            contentDescription = "Manage API Keys",
+                            tint = pillColor,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Text(
+                            text = if (activeKeyPresent) {
+                                "${apiState.activeProvider.shortName} • ${apiState.activeConfig.selectedModel}"
+                            } else {
+                                "${apiState.activeProvider.shortName} • Tap to Add API Key"
+                            },
+                            color = TextPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
 
                     ActionExecutionCard(
                         result = uiState.lastExecutedTool,
                         onDismiss = { viewModel.dismissToolCard() }
                     )
+
+                    if (uiState.visualState == AssistantVisualState.ERROR && !uiState.errorMessage.isNullOrBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color(0xFF2B101A))
+                                .border(1.dp, Color(0xFFEF4444).copy(alpha = 0.7f), RoundedCornerShape(14.dp))
+                                .padding(12.dp)
+                                .testTag("home_error_banner")
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.ErrorOutline,
+                                    contentDescription = "API Error",
+                                    tint = Color(0xFFFCA5A5),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = uiState.errorMessage.orEmpty(),
+                                    color = Color(0xFFFEE2E2),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Button(
+                                onClick = { showApiSettingsScreen = true },
+                                colors = ButtonDefaults.buttonColors(containerColor = NeonMagenta),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.testTag("error_open_api_settings_button")
+                            ) {
+                                Text("Open API Keys & Providers", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
                 }
 
                 // 2. Middle Section: Central Interactive Mahi Orb & Status Prompt
@@ -219,11 +329,11 @@ fun MahiScreen(
                     // Dynamic instruction text under Orb
                     val (statusLabel, statusDetail) = when (uiState.visualState) {
                         AssistantVisualState.DISCONNECTED -> "Tap Orb to Start" to "Continuous real-time voice mode"
-                        AssistantVisualState.CONNECTING -> "Connecting..." to "Linking with Gemini Live Brain"
+                        AssistantVisualState.CONNECTING -> "Connecting..." to "Linking with ${apiState.activeProvider.shortName}"
                         AssistantVisualState.LISTENING -> "Listening to you..." to "Speak casually, I'm all ears"
                         AssistantVisualState.THINKING -> "Thinking..." to "Cooking up a witty answer"
                         AssistantVisualState.SPEAKING -> "Mahi is speaking" to "Tap orb anytime to interrupt"
-                        AssistantVisualState.ERROR -> "Offline Mode" to (uiState.errorMessage ?: "Tap to reconnect")
+                        AssistantVisualState.ERROR -> "Connection Error" to "Check API key, model, or network"
                     }
 
                     Text(
@@ -383,6 +493,10 @@ fun MahiScreen(
                     showSubtitles = uiState.showSubtitles,
                     voicePitch = uiState.voicePitch,
                     voiceSpeed = uiState.voiceSpeed,
+                    activeProvider = apiState.activeProvider,
+                    activeModel = apiState.activeConfig.selectedModel,
+                    connectionStatus = apiState.activeConnectionStatus,
+                    onOpenApiSettings = { showApiSettingsScreen = true },
                     onMoodSelected = { mood ->
                         viewModel.setMood(mood)
                     },
