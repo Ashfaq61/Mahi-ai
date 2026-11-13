@@ -577,6 +577,177 @@ class ProviderClient(
         }
     }
 
+    suspend fun analyzeImageWithProvider(
+        provider: AiProvider,
+        apiKey: String,
+        model: String,
+        baseUrl: String,
+        base64Jpeg: String,
+        systemPrompt: String,
+        userPrompt: String
+    ): String = withContext(Dispatchers.IO) {
+        val trimmedKey = apiKey.trim()
+        if (trimmedKey.isEmpty()) {
+            throw ProviderApiException(
+                ApiErrorCategory.MISSING_KEY,
+                "${provider.displayName} API key is missing. Add your key in API Keys & Providers to run Neural Lens AI vision."
+            )
+        }
+        val cleanBase = baseUrl.trim().trimEnd('/').ifBlank { provider.defaultBaseUrl }
+
+        try {
+            when (provider) {
+                AiProvider.GEMINI -> {
+                    val restModel = if (isGeminiLiveAudioModel(model)) "gemini-2.5-flash" else model
+                    callGeminiVision(cleanBase, trimmedKey, restModel, base64Jpeg, systemPrompt, userPrompt)
+                }
+                AiProvider.OPENROUTER,
+                AiProvider.GROQ,
+                AiProvider.HUGGING_FACE,
+                AiProvider.CUSTOM_OPENAI -> callOpenAiVision(
+                    provider = provider,
+                    baseUrl = cleanBase,
+                    apiKey = trimmedKey,
+                    model = model,
+                    base64Jpeg = base64Jpeg,
+                    systemPrompt = systemPrompt,
+                    userPrompt = userPrompt
+                )
+            }
+        } catch (e: ProviderApiException) {
+            throw e
+        } catch (e: SocketTimeoutException) {
+            throw ProviderApiException(
+                ApiErrorCategory.CONNECTION_FAILED,
+                "${provider.shortName} vision request timed out."
+            )
+        } catch (e: IOException) {
+            throw ProviderApiException(
+                ApiErrorCategory.CONNECTION_FAILED,
+                e.localizedMessage ?: "Network error contacting ${provider.shortName} vision."
+            )
+        }
+    }
+
+    private fun callGeminiVision(
+        baseUrl: String,
+        apiKey: String,
+        model: String,
+        base64Jpeg: String,
+        systemPrompt: String,
+        userPrompt: String
+    ): String {
+        val payload = JSONObject().apply {
+            put("systemInstruction", JSONObject().apply {
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply { put("text", systemPrompt) })
+                })
+            })
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply { put("text", userPrompt) })
+                        put(JSONObject().apply {
+                            put("inlineData", JSONObject().apply {
+                                put("mimeType", "image/jpeg")
+                                put("data", base64Jpeg)
+                            })
+                        })
+                    })
+                })
+            })
+        }.toString().toRequestBody(JSON_MEDIA_TYPE)
+
+        val request = Request.Builder()
+            .url("$baseUrl/models/$model:generateContent")
+            .header("x-goog-api-key", apiKey)
+            .post(payload)
+            .build()
+
+        okHttpClient.newCall(request).execute().use { response ->
+            val bodyStr = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw mapHttpError(response.code, bodyStr, "Google Gemini")
+            }
+            val text = JSONObject(bodyStr).optJSONArray("candidates")
+                ?.optJSONObject(0)
+                ?.optJSONObject("content")
+                ?.optJSONArray("parts")
+                ?.optJSONObject(0)
+                ?.optString("text")
+                ?.trim()
+
+            if (text.isNullOrBlank()) {
+                throw ProviderApiException(ApiErrorCategory.UNKNOWN, "Gemini Vision returned an empty explanation.")
+            }
+            return text
+        }
+    }
+
+    private fun callOpenAiVision(
+        provider: AiProvider,
+        baseUrl: String,
+        apiKey: String,
+        model: String,
+        base64Jpeg: String,
+        systemPrompt: String,
+        userPrompt: String
+    ): String {
+        val messages = JSONArray().apply {
+            put(JSONObject().apply {
+                put("role", "system")
+                put("content", systemPrompt)
+            })
+            put(JSONObject().apply {
+                put("role", "user")
+                put("content", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("type", "text")
+                        put("text", userPrompt)
+                    })
+                    put(JSONObject().apply {
+                        put("type", "image_url")
+                        put("image_url", JSONObject().apply {
+                            put("url", "data:image/jpeg;base64,$base64Jpeg")
+                        })
+                    })
+                })
+            })
+        }
+
+        val payload = JSONObject().apply {
+            put("model", model)
+            put("messages", messages)
+            put("max_tokens", 320)
+        }.toString().toRequestBody(JSON_MEDIA_TYPE)
+
+        val reqBuilder = Request.Builder()
+            .url("$baseUrl/chat/completions")
+            .header("Authorization", "Bearer $apiKey")
+            .post(payload)
+        if (provider == AiProvider.OPENROUTER) {
+            reqBuilder.header("X-Title", "Mahi AI Neural Lens")
+        }
+
+        okHttpClient.newCall(reqBuilder.build()).execute().use { response ->
+            val bodyStr = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw mapHttpError(response.code, bodyStr, provider.displayName)
+            }
+            val text = JSONObject(bodyStr).optJSONArray("choices")
+                ?.optJSONObject(0)
+                ?.optJSONObject("message")
+                ?.optString("content")
+                ?.trim()
+
+            if (text.isNullOrBlank()) {
+                throw ProviderApiException(ApiErrorCategory.UNKNOWN, "${provider.shortName} Vision returned an empty response.")
+            }
+            return text
+        }
+    }
+
     fun mapHttpError(code: Int, rawBody: String, providerName: String): ProviderApiException {
         val extractedMessage = extractApiErrorMessage(rawBody)
         val lower = extractedMessage.lowercase()

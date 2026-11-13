@@ -2,6 +2,7 @@ package com.example.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -27,15 +28,39 @@ import com.example.api.isGeminiLiveAudioModel
 import com.example.audio.AudioRecordManager
 import com.example.audio.MahiSpeechSynthesizer
 import com.example.audio.SpeechRecognitionManager
+import com.example.automation.AgentActionType
+import com.example.automation.AgentPlanStep
+import com.example.automation.AutomationHistoryEntry
+import com.example.automation.AutonomousAgentEngine
+import com.example.automation.CapturedNotification
+import com.example.automation.DeviceControlHelper
+import com.example.automation.MahiAccessibilityService
+import com.example.automation.MahiNotificationService
+import com.example.automation.PendingSensitiveConfirmation
+import com.example.automation.ScreenSnapshot
+import com.example.automation.SensitiveCategory
+import com.example.preferences.AppLanguage
+import com.example.preferences.AppThemeMode
+import com.example.preferences.MahiPreferencesStore
+import com.example.preferences.MahiUserPrefs
+import com.example.research.AiSearchResult
+import com.example.research.DeepResearchReport
+import com.example.research.ExportedPdfResult
+import com.example.research.ResearchEngine
+import com.example.research.ResearchPdfExporter
 import com.example.tools.MahiToolsManager
 import com.example.tools.ToolAction
 import com.example.tools.ToolExecutionResult
+import com.example.vision.LiveVisionSnapshot
+import com.example.vision.NeuralLensAnalyzer
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class AssistantVisualState {
     DISCONNECTED,
@@ -71,6 +96,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     private val providerClient = ProviderClient()
     val secureKeyStore = SecureApiKeyStore(application)
     private val geminiLiveClient = GeminiLiveClient()
+    val preferencesStore = MahiPreferencesStore(application)
 
     private val audioRecordManager = AudioRecordManager()
     private val speechRecognitionManager = SpeechRecognitionManager(application)
@@ -78,10 +104,52 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     private val aiEngine = MahiAiEngine(providerClient)
     private val toolsManager = MahiToolsManager(application)
 
+    val neuralLensAnalyzer = NeuralLensAnalyzer(providerClient)
+    private val researchEngine = ResearchEngine(providerClient = providerClient)
+    val deviceControlHelper = DeviceControlHelper(application)
+    val autonomousAgentEngine = AutonomousAgentEngine(
+        context = application,
+        deviceControl = deviceControlHelper,
+        providerClient = providerClient
+    )
+
     private val _uiState = MutableStateFlow(AssistantUiState())
     val uiState: StateFlow<AssistantUiState> = _uiState.asStateFlow()
 
     val apiManagerState: StateFlow<ApiManagerState> = secureKeyStore.state
+    val userPrefs: StateFlow<MahiUserPrefs> = preferencesStore.prefsFlow
+
+    // Neural Lens state
+    val liveVisionSnapshot: StateFlow<LiveVisionSnapshot> = neuralLensAnalyzer.liveSnapshot
+    private val _visionAnswer = MutableStateFlow("")
+    val visionAnswer: StateFlow<String> = _visionAnswer.asStateFlow()
+    private val _isVisionLoading = MutableStateFlow(false)
+    val isVisionLoading: StateFlow<Boolean> = _isVisionLoading.asStateFlow()
+    private val _visionError = MutableStateFlow<String?>(null)
+    val visionError: StateFlow<String?> = _visionError.asStateFlow()
+
+    // Search & Deep Research state
+    private val _isResearchLoading = MutableStateFlow(false)
+    val isResearchLoading: StateFlow<Boolean> = _isResearchLoading.asStateFlow()
+    private val _researchProgress = MutableStateFlow("")
+    val researchProgress: StateFlow<String> = _researchProgress.asStateFlow()
+    private val _aiSearchResult = MutableStateFlow<AiSearchResult?>(null)
+    val aiSearchResult: StateFlow<AiSearchResult?> = _aiSearchResult.asStateFlow()
+    private val _deepResearchReport = MutableStateFlow<DeepResearchReport?>(null)
+    val deepResearchReport: StateFlow<DeepResearchReport?> = _deepResearchReport.asStateFlow()
+    private val _exportedPdf = MutableStateFlow<ExportedPdfResult?>(null)
+    val exportedPdf: StateFlow<ExportedPdfResult?> = _exportedPdf.asStateFlow()
+
+    // Screen Intelligence, Notifications & Autonomous Agent state
+    val screenSnapshot: StateFlow<ScreenSnapshot> = MahiAccessibilityService.screenSnapshot
+    val activeNotifications: StateFlow<List<CapturedNotification>> = MahiNotificationService.notifications
+    val agentPlanSteps: StateFlow<List<AgentPlanStep>> = autonomousAgentEngine.planSteps
+    val isAgentRunning: StateFlow<Boolean> = autonomousAgentEngine.isRunning
+    val pendingSensitiveConfirmation: StateFlow<PendingSensitiveConfirmation?> = autonomousAgentEngine.pendingConfirmation
+    val automationHistory: StateFlow<List<AutomationHistoryEntry>> = autonomousAgentEngine.historyStore.history
+
+    private val _screenAiAnalysis = MutableStateFlow("")
+    val screenAiAnalysis: StateFlow<String> = _screenAiAnalysis.asStateFlow()
 
     private var waveformCollectJob: Job? = null
     private var recognitionCollectJob: Job? = null
@@ -102,6 +170,9 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
     init {
         speechSynthesizer.initialize()
+        val initialLang = preferencesStore.prefsFlow.value.language
+        aiEngine.currentLanguage = initialLang
+        speechSynthesizer.setSpeechLanguage(initialLang.ttsLanguageTag)
 
         // Interrupt TTS playback when user speaks in standard turn-based mode
         speechRecognitionManager.onSpeechInterrupted = {
@@ -215,7 +286,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     }
 
     private fun startGeminiLiveSession(apiKey: String, model: String) {
-        val systemPrompt = aiEngine.buildSystemPrompt(_uiState.value.currentMood)
+        val systemPrompt = aiEngine.buildSystemPrompt(_uiState.value.currentMood, userPrefs.value.language)
         geminiLiveClient.setMuted(_uiState.value.isMuted)
 
         geminiLiveClient.connect(
@@ -404,13 +475,15 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         viewModelScope.launch {
             try {
                 val mood = _uiState.value.currentMood
+                val lang = userPrefs.value.language
                 val response = aiEngine.sendMessageWithProvider(
                     provider = activeProvider,
                     apiKey = apiKey,
                     selectedModel = activeConfig.selectedModel,
                     baseUrl = activeConfig.customBaseUrl,
                     userMessage = query,
-                    mood = mood
+                    mood = mood,
+                    language = lang
                 )
 
                 if (response.toolAction != null) {
@@ -643,6 +716,231 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         _uiState.value = _uiState.value.copy(lastExecutedTool = null)
     }
 
+    // --- Language, Theme & Speech Helpers ---
+
+    fun setLanguage(language: AppLanguage) {
+        preferencesStore.setLanguage(language)
+        aiEngine.currentLanguage = language
+        speechSynthesizer.setSpeechLanguage(language.ttsLanguageTag)
+    }
+
+    fun setThemeMode(themeMode: AppThemeMode) {
+        preferencesStore.setThemeMode(themeMode)
+    }
+
+    fun speakText(text: String) {
+        if (text.isBlank() || _uiState.value.isMuted) return
+        speechSynthesizer.setSpeechLanguage(userPrefs.value.language.ttsLanguageTag)
+        speechSynthesizer.pitch = _uiState.value.voicePitch
+        speechSynthesizer.speechRate = _uiState.value.voiceSpeed
+        speechSynthesizer.speak(text)
+    }
+
+    // --- Neural Lens (Live AI Camera Vision & OCR) ---
+
+    fun askVisionQuestion(question: String) {
+        val state = apiManagerState.value
+        val provider = state.activeProvider
+        val cfg = state.activeConfig
+        val apiKey = secureKeyStore.getActiveDecryptedKey(provider)
+        if (apiKey.isNullOrBlank()) {
+            _visionError.value = "${provider.displayName} API key missing. Add a key for Neural Lens AI analysis."
+            _visionAnswer.value = neuralLensAnalyzer.formatOfflineMlKitSummary(userPrefs.value.language)
+            return
+        }
+
+        _isVisionLoading.value = true
+        _visionError.value = null
+        viewModelScope.launch {
+            try {
+                val answer = neuralLensAnalyzer.askAiAboutVision(
+                    provider = provider,
+                    apiKey = apiKey,
+                    model = cfg.selectedModel,
+                    baseUrl = cfg.customBaseUrl,
+                    language = userPrefs.value.language,
+                    question = question
+                )
+                _visionAnswer.value = answer
+            } catch (e: Exception) {
+                _visionError.value = e.localizedMessage ?: "Vision AI analysis failed."
+            } finally {
+                _isVisionLoading.value = false
+            }
+        }
+    }
+
+    fun analyzeVisionPhotoUri(uri: Uri) {
+        _isVisionLoading.value = true
+        _visionError.value = null
+        viewModelScope.launch {
+            val snap = neuralLensAnalyzer.loadAndAnalyzeUri(getApplication(), uri)
+            if (snap == null) {
+                _visionError.value = "Could not decode selected photo."
+                _isVisionLoading.value = false
+                return@launch
+            }
+            val apiKey = secureKeyStore.getActiveDecryptedKey(apiManagerState.value.activeProvider)
+            if (apiKey.isNullOrBlank()) {
+                _visionAnswer.value = neuralLensAnalyzer.formatOfflineMlKitSummary(userPrefs.value.language)
+                _isVisionLoading.value = false
+            } else {
+                askVisionQuestion("Identify objects, devices, and readable text in this image.")
+            }
+        }
+    }
+
+    // --- AI Search Engine & Deep Research Agent + PDF Export ---
+
+    fun runAiSearch(query: String) {
+        if (query.isBlank()) return
+        val state = apiManagerState.value
+        val provider = state.activeProvider
+        val cfg = state.activeConfig
+        val apiKey = secureKeyStore.getActiveDecryptedKey(provider)
+
+        _isResearchLoading.value = true
+        _researchProgress.value = "Searching live web sources..."
+        viewModelScope.launch {
+            try {
+                val result = researchEngine.runAiSearch(
+                    query = query,
+                    language = userPrefs.value.language,
+                    provider = provider,
+                    apiKey = apiKey,
+                    model = cfg.selectedModel,
+                    baseUrl = cfg.customBaseUrl
+                )
+                _aiSearchResult.value = result
+            } finally {
+                _isResearchLoading.value = false
+                _researchProgress.value = ""
+            }
+        }
+    }
+
+    fun runDeepResearch(topic: String) {
+        if (topic.isBlank()) return
+        val state = apiManagerState.value
+        val provider = state.activeProvider
+        val cfg = state.activeConfig
+        val apiKey = secureKeyStore.getActiveDecryptedKey(provider)
+
+        _isResearchLoading.value = true
+        _exportedPdf.value = null
+        _researchProgress.value = "Planning multi-step research..."
+        viewModelScope.launch {
+            try {
+                val report = researchEngine.runDeepResearch(
+                    topic = topic,
+                    language = userPrefs.value.language,
+                    provider = provider,
+                    apiKey = apiKey,
+                    model = cfg.selectedModel,
+                    baseUrl = cfg.customBaseUrl,
+                    onProgress = { status -> _researchProgress.value = status }
+                )
+                _deepResearchReport.value = report
+            } finally {
+                _isResearchLoading.value = false
+                _researchProgress.value = ""
+            }
+        }
+    }
+
+    fun exportResearchPdf(report: DeepResearchReport) {
+        viewModelScope.launch {
+            val exported = withContext(Dispatchers.IO) {
+                ResearchPdfExporter.exportReportToPdf(getApplication(), report)
+            }
+            _exportedPdf.value = exported
+        }
+    }
+
+    // --- Screen Intelligence & Autonomous Android Agent ---
+
+    fun runAgentGoal(goal: String) {
+        if (goal.isBlank()) return
+        val state = apiManagerState.value
+        val provider = state.activeProvider
+        val cfg = state.activeConfig
+        val apiKey = secureKeyStore.getActiveDecryptedKey(provider)
+
+        viewModelScope.launch {
+            val steps = autonomousAgentEngine.createPlanForGoal(
+                goal = goal,
+                screenSnapshot = screenSnapshot.value,
+                language = userPrefs.value.language,
+                provider = provider,
+                apiKey = apiKey,
+                model = cfg.selectedModel,
+                baseUrl = cfg.customBaseUrl
+            )
+            autonomousAgentEngine.executePlan(goal, steps, viewModelScope)
+        }
+    }
+
+    fun stopAgent() {
+        autonomousAgentEngine.stop()
+    }
+
+    fun respondToSensitiveConfirmation(approved: Boolean) {
+        autonomousAgentEngine.respondToSensitiveConfirmation(approved)
+    }
+
+    fun sendAuthorizedWhatsAppReply(notificationKey: String, sender: String, replyText: String) {
+        val goal = "Reply to WhatsApp message from $sender"
+        val step = AgentPlanStep(
+            stepNumber = 1,
+            title = "Send WhatsApp reply to $sender: \"$replyText\"",
+            actionType = AgentActionType.SEND_WHATSAPP_REPLY,
+            param = notificationKey,
+            secondaryParam = replyText,
+            sensitiveCategory = SensitiveCategory.MESSAGE
+        )
+        viewModelScope.launch {
+            autonomousAgentEngine.executePlan(goal, listOf(step), viewModelScope)
+        }
+    }
+
+    fun analyzeCurrentScreenWithAi() {
+        val snap = MahiAccessibilityService.refreshScreenSnapshot() ?: screenSnapshot.value
+        if (snap.elements.isEmpty()) {
+            _screenAiAnalysis.value = "No external screen content captured yet. Enable Mahi Accessibility Service first."
+            return
+        }
+        val state = apiManagerState.value
+        val provider = state.activeProvider
+        val cfg = state.activeConfig
+        val apiKey = secureKeyStore.getActiveDecryptedKey(provider)
+        if (apiKey.isNullOrBlank()) {
+            _screenAiAnalysis.value = snap.readableSummary
+            return
+        }
+
+        _screenAiAnalysis.value = "Analyzing screen UI elements..."
+        viewModelScope.launch {
+            try {
+                val analysis = providerClient.generateChatReply(
+                    provider = provider,
+                    apiKey = apiKey,
+                    model = cfg.selectedModel,
+                    baseUrl = cfg.customBaseUrl,
+                    systemPrompt = "You are Mahi's Screen Intelligence analyzer. Summarize the currently open app, key buttons/menus, and suggested safe next actions concisely. ${userPrefs.value.language.instruction}",
+                    history = emptyList(),
+                    userMessage = snap.readableSummary
+                )
+                _screenAiAnalysis.value = analysis
+            } catch (e: Exception) {
+                _screenAiAnalysis.value = "${snap.readableSummary}\n(AI error: ${e.localizedMessage})"
+            }
+        }
+    }
+
+    fun clearAutomationHistory() {
+        autonomousAgentEngine.historyStore.clear()
+    }
+
     private fun triggerHaptic() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -662,5 +960,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         speechRecognitionManager.release()
         speechSynthesizer.release()
         geminiLiveClient.disconnect()
+        neuralLensAnalyzer.close()
+        autonomousAgentEngine.stop()
     }
 }

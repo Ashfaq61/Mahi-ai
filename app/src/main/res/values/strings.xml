@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Mahi AI</string>
+    <string name="accessibility_service_description">Mahi AI Screen Intelligence &amp; Automation reads on-screen elements and executes user-approved taps, scrolls, and app controls.</string>
+    <string name="notification_service_label">Mahi AI Notification Assistant</string>
 </resources>

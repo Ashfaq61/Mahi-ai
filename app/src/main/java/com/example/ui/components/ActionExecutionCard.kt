@@ -31,23 +31,18 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.tools.ToolExecutionResult
-import com.example.ui.theme.CyberCyan
-import com.example.ui.theme.CyberDarkSurface
-import com.example.ui.theme.NeonMagenta
-import com.example.ui.theme.TextPrimary
-import com.example.ui.theme.TextSecondary
 
 @Composable
 fun ActionExecutionCard(
@@ -56,6 +51,7 @@ fun ActionExecutionCard(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val scheme = MaterialTheme.colorScheme
 
     AnimatedVisibility(
         visible = result != null,
@@ -76,8 +72,8 @@ fun ActionExecutionCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(20.dp))
-                    .background(Color(0xFF16122B).copy(alpha = 0.95f))
-                    .border(1.dp, CyberCyan.copy(alpha = 0.6f), RoundedCornerShape(20.dp))
+                    .background(scheme.surfaceVariant.copy(alpha = 0.96f))
+                    .border(1.dp, scheme.primary.copy(alpha = 0.6f), RoundedCornerShape(20.dp))
                     .padding(14.dp)
                     .testTag("action_execution_card")
             ) {
@@ -94,14 +90,14 @@ fun ActionExecutionCard(
                             modifier = Modifier
                                 .size(38.dp)
                                 .clip(CircleShape)
-                                .background(CyberCyan.copy(alpha = 0.15f))
-                                .border(1.dp, CyberCyan.copy(alpha = 0.4f), CircleShape),
+                                .background(scheme.primary.copy(alpha = 0.15f))
+                                .border(1.dp, scheme.primary.copy(alpha = 0.4f), CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = icon,
                                 contentDescription = result.actionName,
-                                tint = CyberCyan,
+                                tint = scheme.primary,
                                 modifier = Modifier.size(20.dp)
                             )
                         }
@@ -112,7 +108,7 @@ fun ActionExecutionCard(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     text = "FUNCTION EXECUTED",
-                                    color = CyberCyan,
+                                    color = scheme.primary,
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Black,
                                     letterSpacing = 0.8.sp
@@ -120,19 +116,19 @@ fun ActionExecutionCard(
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
                                     text = "• Instant",
-                                    color = TextSecondary,
+                                    color = scheme.onSurfaceVariant,
                                     fontSize = 10.sp
                                 )
                             }
                             Text(
                                 text = result.displayTitle,
-                                color = TextPrimary,
+                                color = scheme.onSurface,
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
                                 text = result.message,
-                                color = TextSecondary,
+                                color = scheme.onSurfaceVariant,
                                 fontSize = 12.sp,
                                 maxLines = 1
                             )
@@ -153,7 +149,7 @@ fun ActionExecutionCard(
                                 Icon(
                                     imageVector = Icons.Default.OpenInNew,
                                     contentDescription = "Open Link",
-                                    tint = NeonMagenta,
+                                    tint = scheme.secondary,
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -166,7 +162,7 @@ fun ActionExecutionCard(
                             Icon(
                                 imageVector = Icons.Default.Close,
                                 contentDescription = "Dismiss",
-                                tint = TextSecondary,
+                                tint = scheme.onSurfaceVariant,
                                 modifier = Modifier.size(18.dp)
                             )
                         }

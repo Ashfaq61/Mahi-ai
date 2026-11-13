@@ -23,3 +23,13 @@ val TextTertiary = Color(0xFF64748B)
 val OrbGradientStart = Color(0xFFFF2A85)
 val OrbGradientMiddle = Color(0xFFA855F7)
 val OrbGradientEnd = Color(0xFF00F0FF)
+
+// Luminous Light Palette
+val LightBackground = Color(0xFFF4F6FC)
+val LightSurface = Color(0xFFFFFFFF)
+val LightSurfaceVariant = Color(0xFFE8ECF7)
+val LightBorder = Color(0xFFD0D7EA)
+val LightPrimaryMagenta = Color(0xFFD81B60)
+val LightSecondaryCyan = Color(0xFF00838F)
+val LightTextPrimary = Color(0xFF0F172A)
+val LightTextSecondary = Color(0xFF475569)

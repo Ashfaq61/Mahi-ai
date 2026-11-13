@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
@@ -43,14 +44,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ai.MahiMood
 import com.example.api.ConnectionStatus
-import com.example.ui.theme.CyberBorderGlow
 import com.example.ui.theme.CyberCyan
-import com.example.ui.theme.CyberDarkSurface
 import com.example.ui.theme.CyberEmerald
 import com.example.ui.theme.NeonMagenta
 import com.example.ui.theme.NeonViolet
-import com.example.ui.theme.TextPrimary
-import com.example.ui.theme.TextSecondary
 import com.example.viewmodel.AssistantVisualState
 
 @Composable
@@ -67,7 +64,7 @@ fun MahiStatusBanner(
     onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "StatusDotTransition")
+    val colors = MaterialTheme.colorScheme
 
     val (statusText, statusColor) = when (visualState) {
         AssistantVisualState.DISCONNECTED -> "STANDBY" to Color(0xFF94A3B8)
@@ -88,8 +85,8 @@ fun MahiStatusBanner(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(24.dp))
-            .background(CyberDarkSurface.copy(alpha = 0.85f))
-            .border(1.dp, CyberBorderGlow, RoundedCornerShape(24.dp))
+            .background(colors.surface.copy(alpha = 0.9f))
+            .border(1.dp, colors.outline, RoundedCornerShape(24.dp))
             .padding(horizontal = 16.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -98,7 +95,6 @@ fun MahiStatusBanner(
         Row(
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Pulsing live status dot
             Box(
                 modifier = Modifier
                     .size(10.dp)
@@ -112,7 +108,7 @@ fun MahiStatusBanner(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = "MAHI",
-                        color = TextPrimary,
+                        color = colors.onSurface,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Black,
                         letterSpacing = 1.sp
@@ -140,7 +136,7 @@ fun MahiStatusBanner(
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(16.dp))
-                .background(Color(0xFF20163B))
+                .background(colors.surfaceVariant)
                 .border(1.dp, NeonViolet.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
                 .clickable { onMoodClick() }
                 .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -163,7 +159,6 @@ fun MahiStatusBanner(
 
         // Right: Control actions
         Row(verticalAlignment = Alignment.CenterVertically) {
-            // Continuous Voice Mode Toggle
             IconButton(
                 onClick = onContinuousToggle,
                 modifier = Modifier
@@ -173,12 +168,11 @@ fun MahiStatusBanner(
                 Icon(
                     imageVector = Icons.Default.AllInclusive,
                     contentDescription = "Toggle Continuous Voice",
-                    tint = if (isContinuousMode) CyberCyan else TextSecondary,
+                    tint = if (isContinuousMode) CyberCyan else colors.onSurfaceVariant,
                     modifier = Modifier.size(20.dp)
                 )
             }
 
-            // Mute / Unmute Audio Toggle
             IconButton(
                 onClick = onMuteToggle,
                 modifier = Modifier
@@ -188,12 +182,11 @@ fun MahiStatusBanner(
                 Icon(
                     imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
                     contentDescription = "Toggle Mute",
-                    tint = if (isMuted) Color(0xFFEF4444) else TextSecondary,
+                    tint = if (isMuted) Color(0xFFEF4444) else colors.onSurfaceVariant,
                     modifier = Modifier.size(20.dp)
                 )
             }
 
-            // Quick-Access API Keys & Providers Button
             Box(contentAlignment = Alignment.TopEnd) {
                 IconButton(
                     onClick = onApiSettingsClick,
@@ -229,7 +222,6 @@ fun MahiStatusBanner(
                 )
             }
 
-            // Audio & Persona Settings
             IconButton(
                 onClick = onSettingsClick,
                 modifier = Modifier
@@ -240,7 +232,7 @@ fun MahiStatusBanner(
                 Icon(
                     imageVector = Icons.Default.Tune,
                     contentDescription = "Settings",
-                    tint = TextSecondary,
+                    tint = colors.onSurfaceVariant,
                     modifier = Modifier.size(20.dp)
                 )
             }

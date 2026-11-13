@@ -43,9 +43,17 @@ class MahiSpeechSynthesizer(private val context: Context) {
 
     var pitch: Float = 1.20f // Confident, young female voice pitch
     var speechRate: Float = 1.08f // Snappy, casual, lively cadence
+    private var activeLocale: Locale = Locale.US
 
     private var animationJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default)
+
+    fun setSpeechLanguage(languageTag: String) {
+        activeLocale = Locale.forLanguageTag(languageTag)
+        if (isInitialized) {
+            configureVoice()
+        }
+    }
 
     fun initialize(onReady: () -> Unit = {}) {
         if (tts != null && isInitialized) {
@@ -68,8 +76,9 @@ class MahiSpeechSynthesizer(private val context: Context) {
 
     private fun configureVoice() {
         tts?.let { engine ->
-            val locale = Locale.US
-            engine.language = locale
+            val locale = activeLocale
+            val availability = engine.isLanguageAvailable(locale)
+            engine.language = if (availability >= TextToSpeech.LANG_AVAILABLE) locale else Locale.US
             engine.setPitch(pitch)
             engine.setSpeechRate(speechRate)
 

@@ -16,12 +16,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -29,10 +29,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.theme.CyberCyan
-import com.example.ui.theme.CyberDarkSurface
 import com.example.ui.theme.NeonMagenta
-import com.example.ui.theme.TextPrimary
-import com.example.ui.theme.TextSecondary
 import com.example.viewmodel.AssistantVisualState
 
 @Composable
@@ -43,6 +40,7 @@ fun SubtitleOverlay(
     showSubtitles: Boolean,
     modifier: Modifier = Modifier
 ) {
+    val colors = MaterialTheme.colorScheme
     AnimatedVisibility(
         visible = showSubtitles && (userText.isNotBlank() || assistantText.isNotBlank()),
         enter = fadeIn(),
@@ -53,8 +51,8 @@ fun SubtitleOverlay(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(22.dp))
-                .background(Color(0xFF0F0B1E).copy(alpha = 0.88f))
-                .border(1.dp, Color(0xFF2E2452), RoundedCornerShape(22.dp))
+                .background(colors.surface.copy(alpha = 0.92f))
+                .border(1.dp, colors.outline, RoundedCornerShape(22.dp))
                 .padding(horizontal = 18.dp, vertical = 14.dp)
                 .testTag("subtitle_overlay_card")
         ) {
@@ -62,7 +60,6 @@ fun SubtitleOverlay(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // User transcription if listening or thinking
                 if (userText.isNotBlank()) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -85,7 +82,7 @@ fun SubtitleOverlay(
                     }
                     Text(
                         text = "\"$userText\"",
-                        color = TextSecondary,
+                        color = colors.onSurfaceVariant,
                         fontSize = 13.sp,
                         fontStyle = FontStyle.Italic,
                         textAlign = TextAlign.Center,
@@ -93,14 +90,13 @@ fun SubtitleOverlay(
                     )
                 }
 
-                // Assistant reply
                 if (assistantText.isNotBlank()) {
                     if (userText.isNotBlank()) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth(0.5f)
                                 .height(1.dp)
-                                .background(Color(0xFF261E42))
+                                .background(colors.outline)
                                 .padding(vertical = 4.dp)
                         )
                         Spacer(modifier = Modifier.height(8.dp))
@@ -128,7 +124,7 @@ fun SubtitleOverlay(
 
                     Text(
                         text = assistantText,
-                        color = TextPrimary,
+                        color = colors.onSurface,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Medium,
                         lineHeight = 22.sp,

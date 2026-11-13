@@ -11,23 +11,22 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.ui.theme.CyberBorderGlow
-import com.example.ui.theme.TextPrimary
 
 @Composable
 fun QuickPromptChips(
     onPromptSelected: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val colors = MaterialTheme.colorScheme
     val prompts = listOf(
         "Tease me 😏",
         "Open Spotify 🎵",
@@ -53,15 +52,15 @@ fun QuickPromptChips(
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(18.dp))
-                    .background(Color(0xFF15102A).copy(alpha = 0.85f))
-                    .border(1.dp, CyberBorderGlow, RoundedCornerShape(18.dp))
+                    .background(colors.surfaceVariant)
+                    .border(1.dp, colors.outline, RoundedCornerShape(18.dp))
                     .clickable { onPromptSelected(prompt) }
                     .padding(horizontal = 14.dp, vertical = 8.dp)
                     .testTag("prompt_chip_${prompt.take(6).trim()}")
             ) {
                 Text(
                     text = prompt,
-                    color = TextPrimary,
+                    color = colors.onSurface,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium
                 )

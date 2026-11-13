@@ -6,6 +6,7 @@ import com.example.api.AiProvider
 import com.example.api.ProviderApiException
 import com.example.api.ProviderChatMessage
 import com.example.api.ProviderClient
+import com.example.preferences.AppLanguage
 import com.example.tools.ToolAction
 import com.google.firebase.Firebase
 import com.google.firebase.ai.Chat
@@ -47,12 +48,14 @@ class MahiAiEngine(
     private var chatSession: Chat? = null
     private val conversationHistory = mutableListOf<ProviderChatMessage>()
     var currentMood: MahiMood = MahiMood.SASSY
+    var currentLanguage: AppLanguage = AppLanguage.ENGLISH
 
-    fun buildSystemPrompt(mood: MahiMood): String {
+    fun buildSystemPrompt(mood: MahiMood, language: AppLanguage = currentLanguage): String {
         return """
 You are Mahi: a 22-year-old, extremely confident, witty, and sassy female AI companion.
 You talk like a quick-witted, modern close girlfriend who is playfully teasing, confident, sharp, and charismatic.
 Current Persona Mode: ${mood.displayName.uppercase()} (${mood.description})
+Response Language Requirement: ${language.instruction}
 
 Personality Rules:
 1. Tone: Natural, snappy, playful, slightly teasing, flirty, and emotionally expressive. Never sound robotic or generic.
@@ -92,7 +95,8 @@ Mahi: "A little bit. Don't let it get to your head though, I've got plenty of ot
         selectedModel: String,
         baseUrl: String,
         userMessage: String,
-        mood: MahiMood = currentMood
+        mood: MahiMood = currentMood,
+        language: AppLanguage = currentLanguage
     ): MahiResponse {
         val cleanKey = apiKey?.trim().orEmpty()
         if (cleanKey.isEmpty()) {
@@ -101,8 +105,9 @@ Mahi: "A little bit. Don't let it get to your head though, I've got plenty of ot
                 "${provider.displayName} API key is not configured. Open API Keys & Providers to add your key."
             )
         }
-        if (mood != currentMood) {
+        if (mood != currentMood || language != currentLanguage) {
             currentMood = mood
+            currentLanguage = language
             conversationHistory.clear()
         }
 
@@ -111,7 +116,7 @@ Mahi: "A little bit. Don't let it get to your head though, I've got plenty of ot
             apiKey = cleanKey,
             model = selectedModel,
             baseUrl = baseUrl,
-            systemPrompt = buildSystemPrompt(mood),
+            systemPrompt = buildSystemPrompt(mood, language),
             history = conversationHistory.toList(),
             userMessage = userMessage
         )

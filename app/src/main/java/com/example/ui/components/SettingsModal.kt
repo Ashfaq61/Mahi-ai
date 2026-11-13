@@ -26,6 +26,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -45,19 +46,18 @@ import androidx.compose.ui.unit.sp
 import com.example.ai.MahiMood
 import com.example.api.AiProvider
 import com.example.api.ConnectionStatus
-import com.example.ui.theme.CyberBorderGlow
+import com.example.preferences.AppLanguage
+import com.example.preferences.AppThemeMode
 import com.example.ui.theme.CyberCyan
-import com.example.ui.theme.CyberDarkBackground
-import com.example.ui.theme.CyberDarkSurface
 import com.example.ui.theme.NeonMagenta
 import com.example.ui.theme.NeonViolet
-import com.example.ui.theme.TextPrimary
-import com.example.ui.theme.TextSecondary
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsModal(
     currentMood: MahiMood,
+    currentLanguage: AppLanguage = AppLanguage.ENGLISH,
+    currentThemeMode: AppThemeMode = AppThemeMode.DARK,
     isContinuousMode: Boolean,
     showSubtitles: Boolean,
     voicePitch: Float,
@@ -66,6 +66,8 @@ fun SettingsModal(
     activeModel: String = activeProvider.defaultModels.first(),
     connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
     onOpenApiSettings: () -> Unit = {},
+    onLanguageSelected: (AppLanguage) -> Unit = {},
+    onThemeSelected: (AppThemeMode) -> Unit = {},
     onMoodSelected: (MahiMood) -> Unit,
     onContinuousToggle: () -> Unit,
     onSubtitlesToggle: () -> Unit,
@@ -75,11 +77,12 @@ fun SettingsModal(
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val colors = MaterialTheme.colorScheme
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = CyberDarkSurface,
+        containerColor = colors.surface,
         dragHandle = null
     ) {
         Column(
@@ -103,8 +106,8 @@ fun SettingsModal(
                         letterSpacing = 1.sp
                     )
                     Text(
-                        text = "Voice & Persona Tuning",
-                        color = TextPrimary,
+                        text = "Voice, Language & Appearance",
+                        color = colors.onSurface,
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -114,7 +117,7 @@ fun SettingsModal(
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Close",
-                        tint = TextSecondary
+                        tint = colors.onSurfaceVariant
                     )
                 }
             }
@@ -126,7 +129,7 @@ fun SettingsModal(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
-                    .background(Color(0xFF1A1238))
+                    .background(colors.surfaceVariant)
                     .border(1.dp, CyberCyan.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
                     .clickable {
                         onDismiss()
@@ -159,13 +162,13 @@ fun SettingsModal(
                     Column {
                         Text(
                             text = "API Keys & Providers",
-                            color = TextPrimary,
+                            color = colors.onSurface,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
                             text = "${activeProvider.shortName} • $activeModel",
-                            color = TextSecondary,
+                            color = colors.onSurfaceVariant,
                             fontSize = 11.sp
                         )
                         Spacer(modifier = Modifier.height(4.dp))
@@ -179,12 +182,94 @@ fun SettingsModal(
                 )
             }
 
+            Spacer(modifier = Modifier.height(18.dp))
+
+            // Language Selector (English, Roman Urdu, Urdu)
+            Text(
+                text = "Assistant & Vision Language",
+                color = colors.onSurface,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                AppLanguage.entries.forEach { lang ->
+                    val selected = lang == currentLanguage
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (selected) NeonMagenta else colors.surfaceVariant)
+                            .border(
+                                1.dp,
+                                if (selected) NeonMagenta else colors.outline,
+                                RoundedCornerShape(12.dp)
+                            )
+                            .clickable { onLanguageSelected(lang) }
+                            .padding(vertical = 10.dp)
+                            .testTag("settings_lang_${lang.id}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = lang.displayName,
+                            color = if (selected) Color.White else colors.onSurface,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Theme Mode Selector (Dark, Light, System)
+            Text(
+                text = "Theme Appearance",
+                color = colors.onSurface,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                AppThemeMode.entries.forEach { mode ->
+                    val selected = mode == currentThemeMode
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (selected) NeonViolet else colors.surfaceVariant)
+                            .border(
+                                1.dp,
+                                if (selected) NeonViolet else colors.outline,
+                                RoundedCornerShape(12.dp)
+                            )
+                            .clickable { onThemeSelected(mode) }
+                            .padding(vertical = 10.dp)
+                            .testTag("settings_theme_${mode.id}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = mode.displayName,
+                            color = if (selected) Color.White else colors.onSurface,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(20.dp))
 
             // Mood Selector
             Text(
                 text = "Persona Mood",
-                color = TextPrimary,
+                color = colors.onSurface,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -197,10 +282,10 @@ fun SettingsModal(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(14.dp))
-                            .background(if (isSelected) Color(0xFF261945) else Color(0xFF140F28))
+                            .background(if (isSelected) NeonMagenta.copy(alpha = 0.14f) else colors.surfaceVariant)
                             .border(
                                 width = 1.dp,
-                                color = if (isSelected) NeonMagenta else Color(0xFF2C244C),
+                                color = if (isSelected) NeonMagenta else colors.outline,
                                 shape = RoundedCornerShape(14.dp)
                             )
                             .clickable { onMoodSelected(mood) }
@@ -214,13 +299,13 @@ fun SettingsModal(
                             Column {
                                 Text(
                                     text = mood.displayName,
-                                    color = if (isSelected) NeonMagenta else TextPrimary,
+                                    color = if (isSelected) NeonMagenta else colors.onSurface,
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
                                     text = mood.description,
-                                    color = TextSecondary,
+                                    color = colors.onSurfaceVariant,
                                     fontSize = 11.sp
                                 )
                             }
@@ -236,7 +321,7 @@ fun SettingsModal(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0xFF140F28))
+                    .background(colors.surfaceVariant)
                     .padding(14.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
@@ -244,13 +329,13 @@ fun SettingsModal(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Continuous Voice Loop",
-                        color = TextPrimary,
+                        color = colors.onSurface,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
                         text = "Keep mic active after Mahi finishes speaking",
-                        color = TextSecondary,
+                        color = colors.onSurfaceVariant,
                         fontSize = 11.sp
                     )
                 }
@@ -260,7 +345,7 @@ fun SettingsModal(
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.White,
                         checkedTrackColor = NeonMagenta,
-                        uncheckedTrackColor = Color(0xFF2E2452)
+                        uncheckedTrackColor = colors.outline
                     ),
                     modifier = Modifier.testTag("continuous_mode_switch")
                 )
@@ -273,7 +358,7 @@ fun SettingsModal(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0xFF140F28))
+                    .background(colors.surfaceVariant)
                     .padding(14.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
@@ -281,13 +366,13 @@ fun SettingsModal(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Live Holographic Subtitles",
-                        color = TextPrimary,
+                        color = colors.onSurface,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
                         text = "Show speech captions in real-time",
-                        color = TextSecondary,
+                        color = colors.onSurfaceVariant,
                         fontSize = 11.sp
                     )
                 }
@@ -297,7 +382,7 @@ fun SettingsModal(
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.White,
                         checkedTrackColor = CyberCyan,
-                        uncheckedTrackColor = Color(0xFF2E2452)
+                        uncheckedTrackColor = colors.outline
                     )
                 )
             }
@@ -307,7 +392,7 @@ fun SettingsModal(
             // Voice Pitch Slider
             Text(
                 text = "Voice Pitch: ${String.format("%.2f", voicePitch)}x",
-                color = TextPrimary,
+                color = colors.onSurface,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -318,14 +403,14 @@ fun SettingsModal(
                 colors = SliderDefaults.colors(
                     thumbColor = NeonMagenta,
                     activeTrackColor = NeonMagenta,
-                    inactiveTrackColor = Color(0xFF2E2452)
+                    inactiveTrackColor = colors.outline
                 )
             )
 
             // Voice Speed Slider
             Text(
                 text = "Speech Cadence: ${String.format("%.2f", voiceSpeed)}x",
-                color = TextPrimary,
+                color = colors.onSurface,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -336,7 +421,7 @@ fun SettingsModal(
                 colors = SliderDefaults.colors(
                     thumbColor = CyberCyan,
                     activeTrackColor = CyberCyan,
-                    inactiveTrackColor = Color(0xFF2E2452)
+                    inactiveTrackColor = colors.outline
                 )
             )
 
