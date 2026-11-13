@@ -65,15 +65,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Restore Deterministic Debug Keystore
+      - name: Cache Standard Android Debug Keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: mahi-ai-android-debug-keystore-v1
+
+      - name: Prepare Standard Android Debug Keystore
         run: |
-          if [ -f debug.keystore.base64 ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
-            echo "Restored deterministic debug.keystore from debug.keystore.base64"
-          else
-            echo "ERROR: debug.keystore.base64 is missing; refusing to generate an incompatible ephemeral keystore."
-            exit 1
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/debug.keystore ]; then
+            echo "Generating standard Android debug keystore..."
+            keytool -genkey -v -keystore ~/.android/debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
+          cp ~/.android/debug.keystore debug.keystore
           keytool -list -v -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android | grep -E "SHA1:|SHA256:"
 
       - name: Grant Execute Permission to Gradlew
@@ -87,7 +95,7 @@ jobs:
         run: |
           ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Align, Sign (v1/v2/v3), and Validate Debug APK
+      - name: Align, Sign (v2/v3), and Validate Debug APK
         id: verify_debug_apk
         run: |
           BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
@@ -103,7 +111,7 @@ jobs:
           # Ensure 4-byte zipalign and 16KB page alignment for Android 15/16+ compatibility
           "$BUILD_TOOLS/zipalign" -f -P 16 4 "$SOURCE_APK" "$ALIGNED_APK"
 
-          # Sign with v1, v2, and v3 schemes using the deterministic debug.keystore
+          # Sign with v2 and v3 schemes using the standard Android debug keystore
           "$BUILD_TOOLS/apksigner" sign \
             --ks debug.keystore \
             --ks-key-alias androiddebugkey \
@@ -122,7 +130,7 @@ jobs:
             exit 1
           fi
 
-          echo "=== Verifying Signature (v1/v2/v3) ==="
+          echo "=== Verifying Signature (v2/v3) ==="
           "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$FINAL_APK"
 
           echo "=== Verifying 16KB Zipalign ==="
@@ -140,16 +148,20 @@ jobs:
           echo "apk_size=$FILE_SIZE" >> $GITHUB_OUTPUT
           echo "apk_sha256=$SHA256_SUM" >> $GITHUB_OUTPUT
 
-      - name: Build & Sign Release APK (If Signing Secrets Configured)
+      - name: Build & Sign Release APK (Optional - When Signing Secrets Are Configured)
         id: build_release
-        if: env.HAS_RELEASE_KEY == 'true'
         env:
-          HAS_RELEASE_KEY: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' && secrets.STORE_PASSWORD != '' && secrets.KEY_PASSWORD != '' }}
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
         run: |
-          echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > "$KEYSTORE_PATH"
+          if [ -z "$RELEASE_KEYSTORE_BASE64" ] || [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "Release signing secrets not configured; skipping optional release APK build."
+            exit 0
+          fi
+
+          echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH"
           ./gradlew :app:assembleRelease --no-daemon --stacktrace
           BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
           "$BUILD_TOOLS/zipalign" -f -P 16 4 app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/app-release-aligned.apk
@@ -191,13 +203,13 @@ jobs:
             - **Package ID:** `com.aistudio.mahiai.vzrtkp`
             - **Version:** `1.0.1` (`versionCode: 2`)
             - **Architectures:** `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`
-            - **Signing:** Deterministic Debug Keystore (v1 + v2 + v3 APK Signature Schemes verified)
-            - **Alignment:** 16KB page-aligned (`zipalign -P 16 -p 4`)
+            - **Signing:** Standard Android Debug Keystore (v2 + v3 APK Signature Schemes verified)
+            - **Alignment:** 16KB page-aligned (`zipalign -P 16 4`)
             - **SHA-256:** `${{ steps.verify_debug_apk.outputs.apk_sha256 }}`
             - **Size:** `${{ steps.verify_debug_apk.outputs.apk_size }}` bytes
 
-            **Installation Note:**
-            If you previously installed an older test build signed with an ephemeral CI key, uninstall the prior build first so Android can install with the consistent signature. All future builds share this deterministic signature.
+            **Download:**
+            Download `mahi-ai-debug.apk` directly from the release assets below.
           files: |
             mahi-ai-debug.apk
             mahi-ai-release.apk

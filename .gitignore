@@ -16,6 +16,7 @@
 local.properties
 .env
 debug.keystore
+debug.keystore.base64
 .build-outputs/
 *.apk
 *.aab
