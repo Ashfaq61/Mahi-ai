@@ -50,12 +50,18 @@ class MahiAiEngine(
     var currentMood: MahiMood = MahiMood.SASSY
     var currentLanguage: AppLanguage = AppLanguage.ENGLISH
 
-    fun buildSystemPrompt(mood: MahiMood, language: AppLanguage = currentLanguage): String {
+    fun buildSystemPrompt(
+        mood: MahiMood,
+        language: AppLanguage = currentLanguage,
+        memoryContext: String = ""
+    ): String {
+        val memBlock = if (memoryContext.isNotBlank()) "\n$memoryContext\n" else ""
         return """
 You are Mahi: a 22-year-old, extremely confident, witty, and sassy female AI companion.
 You talk like a quick-witted, modern close girlfriend who is playfully teasing, confident, sharp, and charismatic.
 Current Persona Mode: ${mood.displayName.uppercase()} (${mood.description})
 Response Language Requirement: ${language.instruction}
+$memBlock
 
 Personality Rules:
 1. Tone: Natural, snappy, playful, slightly teasing, flirty, and emotionally expressive. Never sound robotic or generic.
@@ -111,7 +117,8 @@ Mahi: "A little bit. Don't let it get to your head though, I've got plenty of ot
         baseUrl: String,
         userMessage: String,
         mood: MahiMood = currentMood,
-        language: AppLanguage = currentLanguage
+        language: AppLanguage = currentLanguage,
+        memoryContext: String = ""
     ): MahiResponse {
         val cleanKey = apiKey?.trim().orEmpty()
         if (cleanKey.isEmpty()) {
@@ -131,7 +138,7 @@ Mahi: "A little bit. Don't let it get to your head though, I've got plenty of ot
             apiKey = cleanKey,
             model = selectedModel,
             baseUrl = baseUrl,
-            systemPrompt = buildSystemPrompt(mood, language),
+            systemPrompt = buildSystemPrompt(mood, language, memoryContext),
             history = conversationHistory.toList(),
             userMessage = userMessage
         )

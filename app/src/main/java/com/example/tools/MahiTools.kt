@@ -14,6 +14,14 @@ import com.example.automation.MahiNotificationService
 import com.example.automation.VoiceGestureIntent
 import com.example.camera.CameraLensFacing
 import com.example.camera.MahiCameraController
+import com.example.control.BatteryInformationManager
+import com.example.control.DeviceInformationManager
+import com.example.control.NetworkInformationManager
+import com.example.control.QuickSettingsManager
+import com.example.control.StorageInformationManager
+import com.example.control.VolumeManager
+import com.example.control.VolumeStreamType
+import com.example.vision.NotificationUnderstandingManager
 
 data class ToolAction(
     val name: String,
@@ -337,8 +345,9 @@ class MahiToolsManager(
                         if (filter.contains("whatsapp")) all.filter { it.isWhatsApp } else all
                     }
                     val enabled = MahiNotificationService.isListenerEnabled(context)
+                    val safeList = NotificationUnderstandingManager().getSafeSummaries(list)
                     val summary = when {
-                        list.isNotEmpty() -> list.take(5).joinToString(" | ") { "${it.appLabel} - ${it.senderTitle}: ${it.messageText}" }
+                        safeList.isNotEmpty() -> safeList.take(5).joinToString(" | ") { "[${it.priority.name}] ${it.appLabel} - ${it.senderTitle}: ${it.redactedMessage}" }
                         !enabled -> "Notification Access is disabled. Enable Mahi Notification Listener in settings to read alerts."
                         else -> "No active notifications right now."
                     }
@@ -348,6 +357,61 @@ class MahiToolsManager(
                         message = summary,
                         isSuccess = enabled || list.isNotEmpty()
                     )
+                }
+
+                "getbatteryinfo" -> {
+                    val info = BatteryInformationManager(context).getBatteryInfo()
+                    ToolExecutionResult("getBatteryInfo", "Battery ${info.levelPercent}%", info.statusSummary, isSuccess = true)
+                }
+
+                "getstorageinfo" -> {
+                    val info = StorageInformationManager().getStorageInfo()
+                    ToolExecutionResult("getStorageInfo", "Internal Storage", info.summary, isSuccess = true)
+                }
+
+                "getnetworkinfo" -> {
+                    val info = NetworkInformationManager(context).getNetworkInfo()
+                    ToolExecutionResult("getNetworkInfo", "Network: ${info.transportLabel}", info.summary, isSuccess = true)
+                }
+
+                "getdeviceinfo" -> {
+                    val info = DeviceInformationManager(context).getDeviceInfo()
+                    ToolExecutionResult("getDeviceInfo", info.manufacturerModel, info.summary, isSuccess = true)
+                }
+
+                "setvolume" -> {
+                    val vm = VolumeManager(context)
+                    val streamName = (action.params["stream"] ?: "media").lowercase()
+                    val stream = when {
+                        streamName.contains("ring") -> VolumeStreamType.RINGTONE
+                        streamName.contains("notif") -> VolumeStreamType.NOTIFICATION
+                        streamName.contains("alarm") -> VolumeStreamType.ALARM
+                        streamName.contains("call") -> VolumeStreamType.CALL
+                        else -> VolumeStreamType.MEDIA
+                    }
+                    val muteArg = action.params["mute"]?.lowercase()
+                    val outcome = if (muteArg == "true" || muteArg == "false") {
+                        vm.muteMedia(muteArg == "true")
+                    } else {
+                        val pct = action.params["percent"]?.toIntOrNull() ?: 50
+                        vm.setStreamPercent(stream, pct)
+                    }
+                    ToolExecutionResult("setVolume", "${stream.displayName} Volume", outcome.message, isSuccess = outcome.success)
+                }
+
+                "openquicksettings" -> {
+                    val target = (action.params["panel"] ?: "quick_settings").lowercase()
+                    val qsm = QuickSettingsManager(context)
+                    val out = when {
+                        target.contains("notif") -> qsm.openNotificationShade()
+                        target.contains("wifi") -> qsm.openInternetOrWirelessPanel()
+                        target.contains("bluetooth") -> qsm.openBluetoothSettings()
+                        target.contains("data") -> qsm.openMobileDataSettings()
+                        target.contains("airplane") -> qsm.openAirplaneModeSettings()
+                        target.contains("nfc") -> qsm.openNfcSettings()
+                        else -> qsm.openQuickSettingsShade()
+                    }
+                    ToolExecutionResult("openQuickSettings", "Quick Settings", out.message, isSuccess = out.success)
                 }
 
                 "opensettings" -> {

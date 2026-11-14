@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -32,11 +33,13 @@ import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -81,6 +84,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.api.ConnectionStatus
 import com.example.camera.CameraLensFacing
 import com.example.ui.components.ActionExecutionCard
+import com.example.ui.components.HistoryMemoryModal
 import com.example.ui.components.HomeQuickControlsBar
 import com.example.ui.components.LiveWaveformVisualizer
 import com.example.ui.components.MahiOrb
@@ -147,6 +151,34 @@ fun MahiScreen(
     val pendingDialNumber by viewModel.pendingDialNumber.collectAsStateWithLifecycle()
     val cameraState by viewModel.cameraState.collectAsStateWithLifecycle()
 
+    // Part 1: Wake, Enrollment, Offline Model & Mic Test
+    val wakeEngineStatus by viewModel.wakeEngineStatus.collectAsStateWithLifecycle()
+    val wakeErrorMessage by viewModel.wakeErrorMessage.collectAsStateWithLifecycle()
+    val wakeEnrollmentState by viewModel.wakeEnrollmentState.collectAsStateWithLifecycle()
+    val wakeModelState by viewModel.wakeModelState.collectAsStateWithLifecycle()
+    val micTestSnapshot by viewModel.micTestSnapshot.collectAsStateWithLifecycle()
+
+    // Part 2: Smart Vision Extended State
+    val visualQaTurns by viewModel.visualQaTurns.collectAsStateWithLifecycle()
+    val imageCompareResult by viewModel.imageCompareResult.collectAsStateWithLifecycle()
+    val ocrExtractedText by viewModel.ocrExtractedText.collectAsStateWithLifecycle()
+
+    // Part 3: History & Memory
+    val historyThreads by viewModel.historyThreads.collectAsStateWithLifecycle()
+    val activeHistoryThreadId by viewModel.activeHistoryThreadId.collectAsStateWithLifecycle()
+    val memoryProfile by viewModel.memoryProfile.collectAsStateWithLifecycle()
+
+    // Part 4: Smart Control Telemetry
+    val batteryInfo by viewModel.batteryInfo.collectAsStateWithLifecycle()
+    val storageInfo by viewModel.storageInfo.collectAsStateWithLifecycle()
+    val networkInfo by viewModel.networkInfo.collectAsStateWithLifecycle()
+    val deviceInfo by viewModel.deviceInfo.collectAsStateWithLifecycle()
+    val volumeLevels by viewModel.volumeLevels.collectAsStateWithLifecycle()
+    val brightnessPercent by viewModel.brightnessPercent.collectAsStateWithLifecycle()
+    val canWriteSettings by viewModel.canWriteSettings.collectAsStateWithLifecycle()
+    val isFlashlightOn by viewModel.isFlashlightOn.collectAsStateWithLifecycle()
+    val smartControlStatus by viewModel.smartControlStatus.collectAsStateWithLifecycle()
+
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val colors = MaterialTheme.colorScheme
@@ -168,6 +200,7 @@ fun MahiScreen(
                     context,
                     Manifest.permission.RECORD_AUDIO
                 ) == PackageManager.PERMISSION_GRANTED
+                viewModel.refreshSmartControlTelemetry()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -183,10 +216,24 @@ fun MahiScreen(
         }
     }
 
+    val wakePermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val micOk = results[Manifest.permission.RECORD_AUDIO] ?: (
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        )
+        hasMicPermission = micOk
+        if (micOk) {
+            viewModel.setWakeDetectionEnabled(true)
+        }
+    }
+
     var selectedTab by remember { mutableStateOf(MahiHomeTab.VOICE) }
     var isCameraStudioMode by remember { mutableStateOf(false) }
     var showSettingsModal by remember { mutableStateOf(false) }
     var showApiSettingsScreen by remember { mutableStateOf(false) }
+    var showSmartControlScreen by remember { mutableStateOf(false) }
+    var showHistoryMemoryModal by remember { mutableStateOf(false) }
     var showTextInput by remember { mutableStateOf(false) }
     var typedQuery by remember { mutableStateOf("") }
 
@@ -212,6 +259,11 @@ fun MahiScreen(
             "CAMERA_STUDIO" -> {
                 selectedTab = MahiHomeTab.LENS
                 isCameraStudioMode = true
+                viewModel.consumeRequestedTab()
+            }
+            "SMART_CONTROL" -> {
+                viewModel.refreshSmartControlTelemetry()
+                showSmartControlScreen = true
                 viewModel.consumeRequestedTab()
             }
         }
@@ -242,6 +294,43 @@ fun MahiScreen(
             onRevealKey = { keyId -> viewModel.revealDecryptedKey(keyId) },
             onModelSelected = { provider, model -> viewModel.setProviderModel(provider, model) },
             onBaseUrlChanged = { provider, url -> viewModel.setProviderBaseUrl(provider, url) },
+            modifier = modifier
+        )
+        return
+    }
+
+    if (showSmartControlScreen) {
+        BackHandler { showSmartControlScreen = false }
+        SmartControlScreen(
+            isFlashlightOn = isFlashlightOn,
+            brightnessPercent = brightnessPercent,
+            canWriteSettings = canWriteSettings,
+            volumeLevels = volumeLevels,
+            batteryInfo = batteryInfo,
+            storageInfo = storageInfo,
+            networkInfo = networkInfo,
+            deviceInfo = deviceInfo,
+            lastControlStatus = smartControlStatus,
+            onBack = { showSmartControlScreen = false },
+            onRefreshAll = { viewModel.refreshSmartControlTelemetry() },
+            onLaunchApp = { viewModel.launchAppDirect(it) },
+            onNavigateToAgent = {
+                showSmartControlScreen = false
+                selectedTab = MahiHomeTab.AGENT
+            },
+            onOpenQuickSettingsShade = { viewModel.openQuickSettingsShade() },
+            onOpenNotificationShade = { viewModel.openNotificationShade() },
+            onOpenWifiPanel = { viewModel.openWifiPanel() },
+            onOpenBluetoothPanel = { viewModel.openBluetoothPanel() },
+            onOpenMobileDataSettings = { viewModel.openMobileDataSettings() },
+            onOpenAirplaneSettings = { viewModel.openAirplaneSettings() },
+            onOpenNfcPanel = { viewModel.openNfcPanel() },
+            onToggleFlashlight = { viewModel.setFlashlightEnabled(it) },
+            onSetVolumeStream = { stream, pct -> viewModel.setVolumeStream(stream, pct) },
+            onToggleMuteMedia = { viewModel.toggleMuteMedia(it) },
+            onSetBrightness = { viewModel.setBrightnessPercent(it) },
+            onOpenWriteSettings = { viewModel.openWriteSettingsPermission() },
+            onOpenDndSettings = { viewModel.openDndPolicySettings() },
             modifier = modifier
         )
         return
@@ -369,32 +458,74 @@ fun MahiScreen(
                                 else -> CyberCyan
                             }
                             Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(colors.surface.copy(alpha = 0.9f))
-                                    .border(1.dp, pillColor.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
-                                    .clickable { showApiSettingsScreen = true }
-                                    .padding(horizontal = 12.dp, vertical = 6.dp)
-                                    .testTag("home_provider_status_pill"),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.VpnKey,
-                                    contentDescription = "Manage API Keys",
-                                    tint = pillColor,
-                                    modifier = Modifier.size(13.dp)
-                                )
-                                Text(
-                                    text = if (activeKeyPresent) {
-                                        "${apiState.activeProvider.shortName} • ${apiState.activeConfig.selectedModel} • ${userPrefs.language.shortBadge}"
-                                    } else {
-                                        "${apiState.activeProvider.shortName} • Tap to Add API Key"
-                                    },
-                                    color = colors.onSurface,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(colors.surface.copy(alpha = 0.9f))
+                                        .border(1.dp, pillColor.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                                        .clickable { showApiSettingsScreen = true }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                        .testTag("home_provider_status_pill"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.VpnKey,
+                                        contentDescription = "Manage API Keys",
+                                        tint = pillColor,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Text(
+                                        text = if (activeKeyPresent) {
+                                            "${apiState.activeProvider.shortName} • ${apiState.activeConfig.selectedModel} • ${userPrefs.language.shortBadge}"
+                                        } else {
+                                            "${apiState.activeProvider.shortName} • Add Key"
+                                        },
+                                        color = colors.onSurface,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(colors.surface.copy(alpha = 0.9f))
+                                        .border(1.dp, CyberCyan.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                                        .clickable {
+                                            viewModel.refreshSmartControlTelemetry()
+                                            showSmartControlScreen = true
+                                        }
+                                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                                        .testTag("home_smart_control_pill")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Tune,
+                                        contentDescription = "Smart Smartphone Control",
+                                        tint = CyberCyan,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(colors.surface.copy(alpha = 0.9f))
+                                        .border(1.dp, NeonMagenta.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                                        .clickable { showHistoryMemoryModal = true }
+                                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                                        .testTag("home_history_memory_pill")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.History,
+                                        contentDescription = "Memory & History",
+                                        tint = NeonMagenta,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
                             }
 
                             if (!uiState.backgroundMicNotice.isNullOrBlank()) {
@@ -830,9 +961,22 @@ fun MahiScreen(
                                 aiVisionAnswer = visionAnswer,
                                 isAnalyzingAi = isVisionLoading,
                                 visionError = visionError,
+                                visualQaTurns = visualQaTurns,
+                                imageCompareResult = imageCompareResult,
+                                ocrExtractedText = ocrExtractedText,
                                 onLanguageSelected = { viewModel.setLanguage(it) },
                                 onAskAiVision = { viewModel.askVisionQuestion(it) },
                                 onAnalyzePhotoUri = { viewModel.analyzeVisionPhotoUri(it) },
+                                onIdentifyObjects = { viewModel.identifyObjectsInLens() },
+                                onRecognizeScene = { viewModel.recognizeSceneInLens() },
+                                onReadLiveScreen = { viewModel.readAndExplainLiveScreen() },
+                                onCaptureAndAnalyzeScreenshot = { viewModel.captureAndAnalyzeScreenshot() },
+                                onSummarizeNotificationsSafe = { viewModel.summarizeNotificationsSafely() },
+                                onExtractOcrFromCurrentFrame = { explain -> viewModel.extractOcrFromCurrentFrame(explain) },
+                                onCopyOcrText = { viewModel.copyOcrText(it) },
+                                onAskVisualFollowUp = { viewModel.askVisualFollowUp(it) },
+                                onResetVisualQa = { viewModel.resetVisualQa() },
+                                onCompareTwoImages = { a, b -> viewModel.compareTwoImages(a, b) },
                                 onSpeakAnswer = { viewModel.speakText(it) },
                                 onOpenApiSettings = { showApiSettingsScreen = true },
                                 modifier = Modifier.weight(1f)
@@ -930,7 +1074,45 @@ fun MahiScreen(
                     activeProvider = apiState.activeProvider,
                     activeModel = apiState.activeConfig.selectedModel,
                     connectionStatus = apiState.activeConnectionStatus,
+                    wakeDetectionEnabled = userPrefs.wakeDetectionEnabled,
+                    wakeEngineStatus = wakeEngineStatus,
+                    wakeErrorMessage = wakeErrorMessage,
+                    wakeEnrollmentState = wakeEnrollmentState,
+                    wakeModelState = wakeModelState,
+                    micTestSnapshot = micTestSnapshot,
                     onOpenApiSettings = { showApiSettingsScreen = true },
+                    onOpenSmartControl = {
+                        viewModel.refreshSmartControlTelemetry()
+                        showSmartControlScreen = true
+                    },
+                    onOpenHistoryMemory = { showHistoryMemoryModal = true },
+                    onToggleWakeDetection = { enabled ->
+                        if (enabled) {
+                            val needed = buildList {
+                                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                    add(Manifest.permission.RECORD_AUDIO)
+                                }
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    add(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                            }
+                            if (needed.isNotEmpty()) {
+                                wakePermLauncher.launch(needed.toTypedArray())
+                            } else {
+                                viewModel.setWakeDetectionEnabled(true)
+                            }
+                        } else {
+                            viewModel.setWakeDetectionEnabled(false)
+                        }
+                    },
+                    onRecordWakeSample = { viewModel.recordWakeEnrollmentSample() },
+                    onResetWakeEnrollment = { viewModel.resetWakeEnrollment() },
+                    onDownloadWakeModel = { viewModel.downloadWakeModel() },
+                    onDeleteWakeModel = { viewModel.deleteWakeModel() },
+                    onToggleMicTest = { viewModel.toggleMicTest() },
+                    onOpenBatteryUnrestrictedSettings = { viewModel.openBatteryUnrestrictedSettings() },
                     onLanguageSelected = { viewModel.setLanguage(it) },
                     onThemeSelected = { viewModel.setThemeMode(it) },
                     onMoodSelected = { mood ->
@@ -946,6 +1128,30 @@ fun MahiScreen(
                         viewModel.processUserQuery("Say something confident and playful in your current voice!")
                     },
                     onDismiss = { showSettingsModal = false }
+                )
+            }
+
+            // History & Consent-Gated Long-Term Memory Modal
+            if (showHistoryMemoryModal) {
+                HistoryMemoryModal(
+                    threads = historyThreads,
+                    activeThreadId = activeHistoryThreadId,
+                    memoryConsentGranted = userPrefs.memoryConsentGranted,
+                    memoryProfile = memoryProfile,
+                    onSelectThread = { viewModel.selectHistoryThread(it) },
+                    onStartNewThread = { viewModel.startNewHistoryThread() },
+                    onDeleteThread = { viewModel.deleteHistoryThread(it) },
+                    onClearAllHistory = { viewModel.clearAllHistory() },
+                    onSetMemoryConsent = { viewModel.setMemoryConsentGranted(it) },
+                    onUpdateProfileFields = { name, langNote, tone ->
+                        viewModel.updateMemoryProfileFields(name, langNote, tone)
+                    },
+                    onAddOrEditFact = { cat, content, id ->
+                        viewModel.addOrEditMemoryFact(cat, content, id)
+                    },
+                    onDeleteFact = { viewModel.deleteMemoryFact(it) },
+                    onForgetEverything = { viewModel.forgetAllMemory() },
+                    onDismiss = { showHistoryMemoryModal = false }
                 )
             }
         }

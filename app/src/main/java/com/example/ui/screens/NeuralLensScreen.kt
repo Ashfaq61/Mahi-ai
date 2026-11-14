@@ -65,13 +65,23 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import android.net.Uri
+import androidx.compose.material.icons.filled.Compare
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Screenshot
+import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.runtime.mutableIntStateOf
 import com.example.preferences.AppLanguage
 import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.CyberEmerald
 import com.example.ui.theme.NeonMagenta
 import com.example.ui.theme.NeonViolet
+import com.example.vision.ImageComparisonResult
 import com.example.vision.LiveVisionSnapshot
 import com.example.vision.NeuralLensAnalyzer
+import com.example.vision.VisualQaTurn
 import java.util.concurrent.Executors
 
 @Composable
@@ -82,9 +92,22 @@ fun NeuralLensScreen(
     aiVisionAnswer: String,
     isAnalyzingAi: Boolean,
     visionError: String?,
+    visualQaTurns: List<VisualQaTurn> = emptyList(),
+    imageCompareResult: ImageComparisonResult? = null,
+    ocrExtractedText: String = "",
     onLanguageSelected: (AppLanguage) -> Unit,
     onAskAiVision: (String) -> Unit,
-    onAnalyzePhotoUri: (android.net.Uri) -> Unit,
+    onAnalyzePhotoUri: (Uri) -> Unit,
+    onIdentifyObjects: () -> Unit = {},
+    onRecognizeScene: () -> Unit = {},
+    onReadLiveScreen: () -> Unit = {},
+    onCaptureAndAnalyzeScreenshot: () -> Unit = {},
+    onSummarizeNotificationsSafe: () -> Unit = {},
+    onExtractOcrFromCurrentFrame: (Boolean) -> Unit = {},
+    onCopyOcrText: (String) -> Unit = {},
+    onAskVisualFollowUp: (String) -> Unit = {},
+    onResetVisualQa: () -> Unit = {},
+    onCompareTwoImages: (Uri, Uri) -> Unit = { _, _ -> },
     onSpeakAnswer: (String) -> Unit,
     onOpenApiSettings: () -> Unit,
     modifier: Modifier = Modifier
@@ -125,6 +148,16 @@ fun NeuralLensScreen(
         }
     }
 
+    var compareUriA by remember { mutableStateOf<Uri?>(null) }
+    var compareUriB by remember { mutableStateOf<Uri?>(null) }
+    val pickCompareA = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) compareUriA = uri
+    }
+    val pickCompareB = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) compareUriB = uri
+    }
+
+    var subMode by remember { mutableIntStateOf(0) } // 0 = Camera & Objects, 1 = Screen & Alerts, 2 = OCR & Compare
     var questionText by remember { mutableStateOf("") }
     val colors = MaterialTheme.colorScheme
 
@@ -176,6 +209,37 @@ fun NeuralLensScreen(
                             fontWeight = FontWeight.Bold
                         )
                     }
+                }
+            }
+        }
+
+        // Smart Vision Sub-Mode Tabs (All 10 Managers Accessible)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(colors.surfaceVariant)
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            listOf("Live Lens", "Screen & Shot", "OCR & Compare").forEachIndexed { idx, label ->
+                val sel = subMode == idx
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (sel) CyberCyan.copy(alpha = 0.22f) else Color.Transparent)
+                        .clickable { subMode = idx }
+                        .padding(vertical = 6.dp)
+                        .testTag("lens_submode_$idx"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        color = if (sel) CyberCyan else colors.onSurfaceVariant,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }
@@ -370,6 +434,124 @@ fun NeuralLensScreen(
             }
         }
 
+        // Sub-Mode Specific Smart Vision Actions
+        if (subMode == 0) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onIdentifyObjects,
+                    modifier = Modifier.weight(1f).testTag("lens_objects_button")
+                ) {
+                    Text("Objects (ML Kit)", fontSize = 11.sp)
+                }
+                OutlinedButton(
+                    onClick = onRecognizeScene,
+                    modifier = Modifier.weight(1f).testTag("lens_scene_button")
+                ) {
+                    Text("Scene Context", fontSize = 11.sp)
+                }
+            }
+        } else if (subMode == 1) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = onReadLiveScreen,
+                        modifier = Modifier.weight(1f).testTag("lens_read_screen_button")
+                    ) {
+                        Text("Screen Vision", fontSize = 11.sp)
+                    }
+                    OutlinedButton(
+                        onClick = onCaptureAndAnalyzeScreenshot,
+                        modifier = Modifier.weight(1f).testTag("lens_screenshot_button")
+                    ) {
+                        Icon(Icons.Default.Screenshot, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Screenshot", fontSize = 11.sp)
+                    }
+                }
+                OutlinedButton(
+                    onClick = onSummarizeNotificationsSafe,
+                    modifier = Modifier.fillMaxWidth().testTag("lens_notifications_digest_button")
+                ) {
+                    Icon(Icons.Default.Notifications, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Summarize Notifications (OTPs Masked)", fontSize = 11.sp)
+                }
+            }
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { onExtractOcrFromCurrentFrame(false) },
+                        modifier = Modifier.weight(1f).testTag("lens_ocr_extract_button")
+                    ) {
+                        Icon(Icons.Default.TextFields, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("OCR (EN/HI/UR)", fontSize = 11.sp)
+                    }
+                    OutlinedButton(
+                        onClick = { onExtractOcrFromCurrentFrame(true) },
+                        modifier = Modifier.weight(1f).testTag("lens_ocr_explain_button")
+                    ) {
+                        Text("Explain Text", fontSize = 11.sp)
+                    }
+                }
+                if (ocrExtractedText.isNotBlank()) {
+                    OutlinedButton(
+                        onClick = { onCopyOcrText(ocrExtractedText) },
+                        modifier = Modifier.fillMaxWidth().testTag("lens_copy_ocr_button")
+                    ) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Copy Extracted OCR Text", fontSize = 11.sp)
+                    }
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { pickCompareA.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(if (compareUriA != null) "Img A Ready ✓" else "Pick Image A", fontSize = 11.sp)
+                    }
+                    OutlinedButton(
+                        onClick = { pickCompareB.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(if (compareUriB != null) "Img B Ready ✓" else "Pick Image B", fontSize = 11.sp)
+                    }
+                }
+                Button(
+                    onClick = {
+                        val a = compareUriA
+                        val b = compareUriB
+                        if (a != null && b != null) onCompareTwoImages(a, b)
+                    },
+                    enabled = compareUriA != null && compareUriB != null && !isAnalyzingAi,
+                    colors = ButtonDefaults.buttonColors(containerColor = NeonViolet),
+                    modifier = Modifier.fillMaxWidth().testTag("lens_compare_images_button")
+                ) {
+                    Icon(Icons.Default.Compare, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Compare 2 Images Side-by-Side", fontSize = 12.sp)
+                }
+                imageCompareResult?.let { cmp ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(colors.surfaceVariant)
+                            .padding(10.dp)
+                    ) {
+                        Text("Similarity: ${cmp.similarityScorePercent}%", color = CyberCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text(cmp.offlineDiffSummary, color = colors.onSurfaceVariant, fontSize = 11.sp)
+                        if (!cmp.aiComparison.isNullOrBlank()) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(cmp.aiComparison, color = colors.onSurface, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        }
+
         // Quick Question Chips
         val quickVisionPrompts = listOf(
             "What product or device is this?",
@@ -408,7 +590,7 @@ fun NeuralLensScreen(
             OutlinedTextField(
                 value = questionText,
                 onValueChange = { questionText = it },
-                placeholder = { Text("Ask Mahi about what she sees...", fontSize = 13.sp) },
+                placeholder = { Text("Ask follow-up Q&A about frame or image...", fontSize = 13.sp) },
                 singleLine = true,
                 modifier = Modifier
                     .weight(1f)
@@ -416,7 +598,13 @@ fun NeuralLensScreen(
             )
             IconButton(
                 onClick = {
-                    if (questionText.isNotBlank()) onAskAiVision(questionText)
+                    if (questionText.isNotBlank()) {
+                        if (visualQaTurns.isNotEmpty()) {
+                            onAskVisualFollowUp(questionText)
+                        } else {
+                            onAskAiVision(questionText)
+                        }
+                    }
                 },
                 modifier = Modifier
                     .minimumInteractiveComponentSize()
@@ -427,6 +615,21 @@ fun NeuralLensScreen(
                     contentDescription = "Ask Vision AI",
                     tint = NeonMagenta
                 )
+            }
+        }
+
+        if (visualQaTurns.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Multi-Turn Visual Q&A (${visualQaTurns.size / 2} turns)", color = CyberCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                OutlinedButton(onClick = onResetVisualQa, modifier = Modifier.testTag("lens_reset_qa_button")) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Reset Q&A", fontSize = 11.sp)
+                }
             }
         }
 

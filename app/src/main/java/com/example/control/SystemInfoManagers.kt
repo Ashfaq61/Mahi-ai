@@ -13,6 +13,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
 import android.os.StatFs
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -22,6 +23,7 @@ data class BatteryInfoSnapshot(
     val isCharging: Boolean = false,
     val chargeSource: String = "Battery",
     val temperatureCelsius: Float = 0f,
+    val voltageVolts: Float = 0f,
     val healthLabel: String = "Unknown",
     val statusSummary: String = "Unavailable"
 )
@@ -51,6 +53,8 @@ class BatteryInformationManager(private val context: Context) {
         }
         val tempTenths = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0)
         val tempC = tempTenths / 10f
+        val voltageMv = intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0)
+        val voltageV = if (voltageMv > 100) voltageMv / 1000f else voltageMv.toFloat()
         val health = when (intent.getIntExtra(BatteryManager.EXTRA_HEALTH, BatteryManager.BATTERY_HEALTH_UNKNOWN)) {
             BatteryManager.BATTERY_HEALTH_GOOD -> "Good"
             BatteryManager.BATTERY_HEALTH_OVERHEAT -> "Overheat"
@@ -59,12 +63,13 @@ class BatteryInformationManager(private val context: Context) {
             BatteryManager.BATTERY_HEALTH_COLD -> "Cold"
             else -> "Normal"
         }
-        val summary = "Battery is $pct% ($plugLabel, ${"%.1f".format(Locale.US, tempC)}°C, Health: $health)."
+        val summary = "Battery is $pct% ($plugLabel, ${"%.1f".format(Locale.US, tempC)}°C, ${"%.2f".format(Locale.US, voltageV)}V, Health: $health)."
         return BatteryInfoSnapshot(
             levelPercent = pct,
             isCharging = charging,
             chargeSource = plugLabel,
             temperatureCelsius = tempC,
+            voltageVolts = voltageV,
             healthLabel = health,
             statusSummary = summary
         )
@@ -179,6 +184,7 @@ data class DeviceInfoSnapshot(
     val totalRamGb: Float = 0f,
     val availRamGb: Float = 0f,
     val abi: String = "",
+    val uptimeFormatted: String = "",
     val summary: String = ""
 )
 
@@ -188,6 +194,11 @@ class DeviceInformationManager(private val context: Context) {
         val androidVer = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
         val patch = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Build.VERSION.SECURITY_PATCH else "Unknown"
         val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
+        val uptimeMs = SystemClock.elapsedRealtime().coerceAtLeast(0L)
+        val totalMinutes = uptimeMs / 60_000L
+        val hours = totalMinutes / 60L
+        val mins = totalMinutes % 60L
+        val uptimeStr = "${hours}h ${mins}m"
 
         var totalGb = 0f
         var availGb = 0f
@@ -203,11 +214,12 @@ class DeviceInformationManager(private val context: Context) {
 
         val summary = String.format(
             Locale.US,
-            "%s running %s • RAM %.1f/%.1f GB free • Security Patch %s",
+            "%s running %s • RAM %.1f/%.1f GB free • Uptime %s • Patch %s",
             modelName,
             androidVer,
             availGb,
             totalGb,
+            uptimeStr,
             patch
         )
         return DeviceInfoSnapshot(
@@ -218,6 +230,7 @@ class DeviceInformationManager(private val context: Context) {
             totalRamGb = totalGb,
             availRamGb = availGb,
             abi = abi,
+            uptimeFormatted = uptimeStr,
             summary = summary
         )
     }

@@ -353,6 +353,60 @@ class GeminiLiveClient(
                     })
                 })
             })
+            put(JSONObject().apply {
+                put("name", "getBatteryInfo")
+                put("description", "Read real Android battery percentage, charging status, temperature, voltage, and health.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "getStorageInfo")
+                put("description", "Read real internal storage free, used, and total space via StatFs.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "getNetworkInfo")
+                put("description", "Read active Wi-Fi or mobile network connectivity status.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "getDeviceInfo")
+                put("description", "Read device model, Android OS version, SDK level, available RAM, and uptime.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "setVolume")
+                put("description", "Adjust or mute Android volume for media, ringtone, notification, alarm, or call stream.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("stream", JSONObject().apply { put("type", "STRING") })
+                        put("percent", JSONObject().apply { put("type", "INTEGER") })
+                        put("mute", JSONObject().apply { put("type", "BOOLEAN") })
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "openQuickSettings")
+                put("description", "Expand Android Quick Settings, Notification shade, or open Wi-Fi, Bluetooth, Mobile Data, Airplane Mode, or NFC panels.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("panel", JSONObject().apply { put("type", "STRING") })
+                    })
+                })
+            })
         }
 
         fun classifyCloseOrFailureError(code: Int?, reasonOrMessage: String): GeminiLiveError {

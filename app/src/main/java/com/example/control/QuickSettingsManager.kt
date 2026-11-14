@@ -43,6 +43,21 @@ class QuickSettingsManager(private val context: Context) {
     fun openBluetoothSettings(): AutomationOutcome =
         launchSettingsIntent(Settings.ACTION_BLUETOOTH_SETTINGS, "Bluetooth settings")
 
+    fun openMobileDataSettings(): AutomationOutcome =
+        launchSettingsIntent(Settings.ACTION_DATA_ROAMING_SETTINGS, "Mobile Data settings")
+
+    fun openAirplaneModeSettings(): AutomationOutcome =
+        launchSettingsIntent(Settings.ACTION_AIRPLANE_MODE_SETTINGS, "Airplane Mode settings")
+
+    fun openNfcSettings(): AutomationOutcome {
+        val action = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            Settings.Panel.ACTION_NFC
+        } else {
+            Settings.ACTION_NFC_SETTINGS
+        }
+        return launchSettingsIntent(action, "NFC settings")
+    }
+
     fun openDisplaySettings(): AutomationOutcome =
         launchSettingsIntent(Settings.ACTION_DISPLAY_SETTINGS, "Display & Brightness settings")
 
@@ -64,7 +79,7 @@ class QuickSettingsManager(private val context: Context) {
     private fun launchSettingsIntent(action: String, label: String): AutomationOutcome {
         return try {
             context.startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            AutomationOutcome(true, "Opened $label", "Dispatched $action")
+            AutomationOutcome(true, "Opened $label (Android 10+ requires panel toggle)", "Dispatched $action")
         } catch (e: Exception) {
             AutomationOutcome(false, e.localizedMessage ?: "Could not open $label")
         }

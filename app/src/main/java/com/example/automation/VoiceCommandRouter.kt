@@ -33,6 +33,15 @@ sealed class RoutedVoiceCommand {
     data class ReadNotifications(val whatsAppOnly: Boolean = false) : RoutedVoiceCommand()
     data class ReplyWhatsApp(val senderHint: String, val message: String) : RoutedVoiceCommand()
 
+    // Part 2: Smart Intelligence & Vision
+    data class AnalyzeScreen(val question: String = "") : RoutedVoiceCommand()
+    data class AnalyzeScreenshot(val question: String = "") : RoutedVoiceCommand()
+    data class DescribeCameraVision(val question: String = "") : RoutedVoiceCommand()
+    object AnalyzeNotifications : RoutedVoiceCommand()
+
+    // Part 4: Smart Smartphone Control & Chained Commands
+    data class SmartControl(val rawPhrase: String, val chainedSteps: List<String> = emptyList()) : RoutedVoiceCommand()
+
     fun deduplicationKey(): String = when (this) {
         StopEverything -> "STOP"
         is LaunchApp -> "LAUNCH:${appName.lowercase()}:${followUpGesture?.actionName.orEmpty()}"
@@ -54,6 +63,11 @@ sealed class RoutedVoiceCommand {
         EndActiveCall -> "END_CALL"
         is ReadNotifications -> "READ_NOTIFS:$whatsAppOnly"
         is ReplyWhatsApp -> "REPLY_WA:${senderHint.lowercase()}:${message.lowercase()}"
+        is AnalyzeScreen -> "VISION_SCREEN:${question.lowercase()}"
+        is AnalyzeScreenshot -> "VISION_SHOT:${question.lowercase()}"
+        is DescribeCameraVision -> "VISION_CAM:${question.lowercase()}"
+        AnalyzeNotifications -> "NOTIF_DIGEST"
+        is SmartControl -> "SMART_CTRL:${rawPhrase.lowercase()}"
     }
 }
 
@@ -240,6 +254,10 @@ object VoiceCommandRouter {
             return RoutedVoiceCommand.OpenGoogle
         }
 
+        // 7b. Part 2 Smart Vision & Part 4 Smart Smartphone Control (evaluated before generic app-launcher keywords)
+        parseSmartVisionCommand(cleanNoWake, lower)?.let { return it }
+        parseSmartControlPreLaunch(cleanNoWake, lower)?.let { return it }
+
         // 8. App Launch + optional follow-up gesture
         val launchKeywords = listOf(
             "open ", "launch ", "start ", "kholo", "chalao", "open karo",
@@ -278,12 +296,85 @@ object VoiceCommandRouter {
             }
         }
 
+        // 8b. Remaining Chained Smart Commands
+        parseSmartControlOrChainedCommand(cleanNoWake, lower)?.let { return it }
+
         // 9. Notifications & WhatsApp Reply commands
         parseNotificationOrWhatsAppCommand(cleanNoWake, lower)?.let { return it }
 
         // 10. Screen Gesture Engine commands (English, Roman Urdu, Urdu)
         parseGesture(clean, lower)?.let { return RoutedVoiceCommand.ExecuteGesture(it) }
 
+        return null
+    }
+
+    private fun parseSmartControlPreLaunch(cleanNoWake: String, lower: String): RoutedVoiceCommand? {
+        val controlKeywords = listOf(
+            "battery", "storage", "wifi", "internet", "network", "phone model", "ka model",
+            "device info", "android version", "uptime", "quick settings", "control center",
+            "notification panel", "notification shade", "notifications kholo", "volume",
+            "mute", "unmute", "ringtone", "brightness", "bluetooth", "mobile data",
+            "airplane", "nfc"
+        )
+        val chainRegex = Regex("(?i)\\s+(?:and then|aur phir|phir|then|aur|and)\\s+")
+        val parts = if (chainRegex.containsMatchIn(cleanNoWake)) {
+            cleanNoWake.split(chainRegex).map { it.trim() }.filter { it.isNotBlank() }
+        } else {
+            emptyList()
+        }
+        val isMultiStepControlChain = parts.size >= 2 && (
+            lower.startsWith("settings") ||
+                lower.contains(" and then ") ||
+                lower.contains(" aur phir ") ||
+                parts.any { p -> controlKeywords.any { k -> p.lowercase().contains(k) } }
+            )
+        if (isMultiStepControlChain) {
+            return RoutedVoiceCommand.SmartControl(cleanNoWake, parts)
+        }
+        if (controlKeywords.any { lower.contains(it) }) {
+            return RoutedVoiceCommand.SmartControl(
+                rawPhrase = cleanNoWake,
+                chainedSteps = if (parts.size >= 2) parts else listOf(cleanNoWake)
+            )
+        }
+        return null
+    }
+
+    private fun parseSmartVisionCommand(cleanNoWake: String, lower: String): RoutedVoiceCommand? {
+        return when {
+            lower.contains("screenshot samjhao") || lower.contains("explain screenshot") ||
+                lower.contains("analyze screenshot") || lower.contains("take screenshot") ||
+                lower.contains("screenshot lo") ->
+                RoutedVoiceCommand.AnalyzeScreenshot(cleanNoWake)
+
+            lower.contains("screen par kya") || lower.contains("screen pe kya") ||
+                lower.contains("what is on screen") || lower.contains("what's on my screen") ||
+                lower.contains("explain screen") || lower.contains("read screen") ||
+                cleanNoWake.contains("اسکرین پر کیا") ->
+                RoutedVoiceCommand.AnalyzeScreen(cleanNoWake)
+
+            lower == "ye kya hai" || lower == "yeh kya hai" || lower.contains("what is this") ||
+                lower.contains("camera mein kya") || lower.contains("samne kya hai") ||
+                cleanNoWake.contains("یہ کیا ہے") ->
+                RoutedVoiceCommand.DescribeCameraVision(cleanNoWake)
+
+            lower == "notification batao" || lower == "notifications batao" ||
+                lower.contains("summarize notification") ->
+                RoutedVoiceCommand.AnalyzeNotifications
+
+            else -> null
+        }
+    }
+
+    private fun parseSmartControlOrChainedCommand(cleanNoWake: String, lower: String): RoutedVoiceCommand? {
+        val chainRegex = Regex("(?i)\\s+(?:and then|aur phir|phir|then|aur|and)\\s+")
+        val hasChainedConnector = chainRegex.containsMatchIn(cleanNoWake)
+        if (hasChainedConnector) {
+            val parts = cleanNoWake.split(chainRegex).map { it.trim() }.filter { it.isNotBlank() }
+            if (parts.size >= 2) {
+                return RoutedVoiceCommand.SmartControl(cleanNoWake, parts)
+            }
+        }
         return null
     }
 

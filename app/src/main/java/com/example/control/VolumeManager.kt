@@ -129,6 +129,16 @@ class VolumeManager(private val context: Context) {
         }
     }
 
+    fun increaseStreamPercent(streamType: VolumeStreamType, stepPercent: Int = 15): AutomationOutcome {
+        val current = getStreamPercent(streamType)
+        return setStreamPercent(streamType, (current + stepPercent).coerceAtMost(100))
+    }
+
+    fun decreaseStreamPercent(streamType: VolumeStreamType, stepPercent: Int = 15): AutomationOutcome {
+        val current = getStreamPercent(streamType)
+        return setStreamPercent(streamType, (current - stepPercent).coerceAtLeast(0))
+    }
+
     fun muteMedia(mute: Boolean): AutomationOutcome {
         val am = audioManager ?: return AutomationOutcome(false, "AudioManager unavailable")
         return try {

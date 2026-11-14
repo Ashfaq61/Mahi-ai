@@ -14,6 +14,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.WakePopupActivity
 import com.example.ai.GeminiLiveCallbacks
 import com.example.ai.GeminiLiveClient
 import com.example.ai.GeminiLiveConnectionPhase
@@ -34,12 +35,20 @@ import com.example.audio.AudioRecordManager
 import com.example.audio.MahiSpeechSynthesizer
 import com.example.audio.MahiVoiceForegroundService
 import com.example.audio.MicCaptureState
+import com.example.audio.MicTestSnapshot
 import com.example.audio.SpeechRecognitionManager
+import com.example.audio.WakeEngineStatus
+import com.example.audio.WakeEnrollmentState
+import com.example.audio.WakeEnrollmentStore
+import com.example.audio.WakeModelManager
+import com.example.audio.WakeModelState
+import com.example.audio.WakeWordEngine
 import com.example.automation.AgentActionType
 import com.example.automation.AgentPlanStep
 import com.example.automation.AppLaunchResult
 import com.example.automation.AppLauncherManager
 import com.example.automation.AutomationHistoryEntry
+import com.example.automation.AutomationOutcome
 import com.example.automation.AutonomousAgentEngine
 import com.example.automation.CapturedNotification
 import com.example.automation.CommandExecutionGuard
@@ -64,6 +73,17 @@ import com.example.calls.CallAutomationRepository
 import com.example.calls.CallRuleContact
 import com.example.calls.MahiInCallService
 import com.example.calls.TelecomCapabilityStatus
+import com.example.control.AllVolumeLevels
+import com.example.control.BatteryInfoSnapshot
+import com.example.control.DeviceInfoSnapshot
+import com.example.control.NetworkInfoSnapshot
+import com.example.control.SmartphoneControlManager
+import com.example.control.StorageInfoSnapshot
+import com.example.control.VolumeStreamType
+import com.example.memory.ConversationHistoryStore
+import com.example.memory.ConversationThread
+import com.example.memory.UserMemoryProfile
+import com.example.memory.UserMemoryStore
 import com.example.preferences.AppLanguage
 import com.example.preferences.AppThemeMode
 import com.example.preferences.MahiPreferencesStore
@@ -76,15 +96,32 @@ import com.example.research.ResearchPdfExporter
 import com.example.tools.MahiToolsManager
 import com.example.tools.ToolAction
 import com.example.tools.ToolExecutionResult
+import com.example.vision.CameraVisionManager
+import com.example.vision.GalleryAnalysisManager
+import com.example.vision.ImageComparisonManager
+import com.example.vision.ImageComparisonResult
 import com.example.vision.LiveVisionSnapshot
 import com.example.vision.NeuralLensAnalyzer
+import com.example.vision.NotificationUnderstandingManager
+import com.example.vision.OCRManager
+import com.example.vision.ObjectRecognitionManager
+import com.example.vision.SceneRecognitionManager
+import com.example.vision.ScreenVisionManager
+import com.example.vision.ScreenshotVisionManager
+import com.example.vision.VisionAiConfig
+import com.example.vision.VisionBitmapUtils
+import com.example.vision.VisualQaTurn
+import com.example.vision.VisualQuestionAnswerManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -226,6 +263,79 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     private val _callFeedback = MutableStateFlow<String?>(null)
     val callFeedback: StateFlow<String?> = _callFeedback.asStateFlow()
 
+    // Part 1: Wake Up Detection, Enrollment, Offline Model & Mic Calibration
+    val wakeEnrollmentStore = WakeEnrollmentStore(application)
+    val wakeModelManager = WakeModelManager(application)
+    val wakeWordEngine = WakeWordEngine(application, wakeEnrollmentStore, wakeModelManager)
+    val wakeEnrollmentState: StateFlow<WakeEnrollmentState> = wakeEnrollmentStore.state
+    val wakeModelState: StateFlow<WakeModelState> = wakeModelManager.state
+    val micTestSnapshot: StateFlow<MicTestSnapshot> = wakeWordEngine.micTest
+    val wakeEngineStatus: StateFlow<WakeEngineStatus> = combine(
+        wakeWordEngine.status,
+        MahiVoiceForegroundService.isWakeServiceActive,
+        preferencesStore.prefsFlow
+    ) { localStatus, serviceActive, prefs ->
+        when {
+            localStatus == WakeEngineStatus.PAUSED_FOR_ACTIVE_VOICE ||
+                localStatus == WakeEngineStatus.STARTING ||
+                localStatus == WakeEngineStatus.ERROR -> localStatus
+            prefs.wakeDetectionEnabled && serviceActive -> WakeEngineStatus.LISTENING_FOR_WAKE
+            !prefs.wakeDetectionEnabled -> WakeEngineStatus.OFF
+            else -> localStatus
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, WakeEngineStatus.OFF)
+    private val _wakeErrorMessage = MutableStateFlow<String?>(null)
+    val wakeErrorMessage: StateFlow<String?> = _wakeErrorMessage.asStateFlow()
+
+    // Part 2: Smart Intelligence & Vision (All 10 Active Managers)
+    val screenVisionManager = ScreenVisionManager(providerClient)
+    val screenshotVisionManager = ScreenshotVisionManager(neuralLensAnalyzer, providerClient)
+    val cameraVisionManager = CameraVisionManager(neuralLensAnalyzer)
+    val objectRecognitionManager = ObjectRecognitionManager(neuralLensAnalyzer)
+    val sceneRecognitionManager = SceneRecognitionManager(neuralLensAnalyzer)
+    val ocrManager = OCRManager(providerClient)
+    val notificationUnderstandingManager = NotificationUnderstandingManager(providerClient)
+    val galleryAnalysisManager = GalleryAnalysisManager(neuralLensAnalyzer)
+    val visualQuestionAnswerManager = VisualQuestionAnswerManager(providerClient)
+    val imageComparisonManager = ImageComparisonManager(ocrManager, providerClient)
+
+    val visualQaTurns: StateFlow<List<VisualQaTurn>> = visualQuestionAnswerManager.turns
+    private val _imageCompareResult = MutableStateFlow<ImageComparisonResult?>(null)
+    val imageCompareResult: StateFlow<ImageComparisonResult?> = _imageCompareResult.asStateFlow()
+    private val _ocrExtractedText = MutableStateFlow("")
+    val ocrExtractedText: StateFlow<String> = _ocrExtractedText.asStateFlow()
+
+    // Part 3: Conversation History & Consent-Gated Memory
+    val conversationHistoryStore = ConversationHistoryStore(application)
+    val userMemoryStore = UserMemoryStore(application)
+    val historyThreads: StateFlow<List<ConversationThread>> = conversationHistoryStore.threads
+    private val _activeHistoryThreadId = MutableStateFlow(conversationHistoryStore.activeThreadId)
+    val activeHistoryThreadId: StateFlow<String?> = _activeHistoryThreadId.asStateFlow()
+    val memoryProfile: StateFlow<UserMemoryProfile> = userMemoryStore.profile
+
+    // Part 4: Smart Smartphone Control & Telemetry
+    val smartphoneControlManager = SmartphoneControlManager(application, deviceControlHelper)
+    private val _batteryInfo = MutableStateFlow(smartphoneControlManager.batteryManager.getBatteryInfo())
+    val batteryInfo: StateFlow<BatteryInfoSnapshot> = _batteryInfo.asStateFlow()
+    private val _storageInfo = MutableStateFlow(smartphoneControlManager.storageManager.getStorageInfo())
+    val storageInfo: StateFlow<StorageInfoSnapshot> = _storageInfo.asStateFlow()
+    private val _networkInfo = MutableStateFlow(smartphoneControlManager.networkManager.getNetworkInfo())
+    val networkInfo: StateFlow<NetworkInfoSnapshot> = _networkInfo.asStateFlow()
+    private val _deviceInfo = MutableStateFlow(smartphoneControlManager.deviceInfoManager.getDeviceInfo())
+    val deviceInfo: StateFlow<DeviceInfoSnapshot> = _deviceInfo.asStateFlow()
+    private val _volumeLevels = MutableStateFlow(smartphoneControlManager.volumeManager.getAllLevels())
+    val volumeLevels: StateFlow<AllVolumeLevels> = _volumeLevels.asStateFlow()
+    private val _brightnessPercent = MutableStateFlow(deviceControlHelper.getBrightnessPercent())
+    val brightnessPercent: StateFlow<Int> = _brightnessPercent.asStateFlow()
+    private val _canWriteSettings = MutableStateFlow(deviceControlHelper.canWriteSystemSettings())
+    val canWriteSettings: StateFlow<Boolean> = _canWriteSettings.asStateFlow()
+    private val _isFlashlightOn = MutableStateFlow(false)
+    val isFlashlightOn: StateFlow<Boolean> = _isFlashlightOn.asStateFlow()
+    private val _smartControlStatus = MutableStateFlow("")
+    val smartControlStatus: StateFlow<String> = _smartControlStatus.asStateFlow()
+
+    private var lastSavedLiveAssistantText: String = ""
+
     private var collectJob: Job? = null
 
     private val vibrator: Vibrator? by lazy {
@@ -253,6 +363,23 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         MahiVoiceForegroundService.onStopRequestedFromNotification = {
             stopSession()
         }
+        MahiVoiceForegroundService.onWakeDisabledFromNotification = {
+            preferencesStore.setWakeDetectionEnabled(false)
+            wakeWordEngine.stopAll()
+        }
+        MahiVoiceForegroundService.onWakeTriggered = { _ ->
+            viewModelScope.launch {
+                val hasAudio = ContextCompat.checkSelfPermission(
+                    getApplication(),
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (hasAudio && !_uiState.value.isGeminiLiveActive &&
+                    _uiState.value.visualState == AssistantVisualState.DISCONNECTED
+                ) {
+                    startSession()
+                }
+            }
+        }
 
         // Barge-in for standard turn-based providers
         speechRecognitionManager.onSpeechInterrupted = {
@@ -267,6 +394,15 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
         observeStreams()
         refreshInstalledApps()
+        refreshSmartControlTelemetry()
+
+        val hasAudio = ContextCompat.checkSelfPermission(
+            application,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (initialPrefs.wakeDetectionEnabled && hasAudio && wakeModelManager.isModelReady()) {
+            MahiVoiceForegroundService.startWakeDetection(application)
+        }
     }
 
     fun handleIncomingAppIntent(intent: Intent?) {
@@ -278,6 +414,16 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         }
         if (!tab.isNullOrBlank()) {
             _requestedTab.value = tab
+        }
+        if (intent.getBooleanExtra(WakePopupActivity.EXTRA_START_LIVE_FROM_WAKE, false)) {
+            intent.removeExtra(WakePopupActivity.EXTRA_START_LIVE_FROM_WAKE)
+            val hasAudio = ContextCompat.checkSelfPermission(
+                getApplication(),
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (hasAudio) {
+                startSession()
+            }
         }
     }
 
@@ -369,6 +515,23 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                     _uiState.update { it.copy(backgroundMicNotice = notice) }
                 }
             }
+            launch {
+                audioRecordManager.isSpeechDetected.collectLatest { speakingUser ->
+                    val st = _uiState.value
+                    if (speakingUser &&
+                        st.visualState == AssistantVisualState.SPEAKING &&
+                        !st.isMuted &&
+                        !st.isGeminiLiveActive
+                    ) {
+                        interruptAssistant()
+                    }
+                }
+            }
+            launch {
+                wakeWordEngine.lastError.collectLatest { err ->
+                    _wakeErrorMessage.value = err
+                }
+            }
         }
     }
 
@@ -440,6 +603,12 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
             return
         }
 
+        // Single-mic arbitration: pause wake detection / mic test before starting active voice mic
+        wakeWordEngine.stopMicTest()
+        wakeWordEngine.pauseForActiveVoice()
+        MahiVoiceForegroundService.pauseWakeForActiveSession(getApplication())
+        wakeWordEngine.requestActiveVoiceAudioFocus()
+
         // Start foreground microphone service cleanly after RECORD_AUDIO verification (Android 14+ requirement)
         MahiVoiceForegroundService.start(getApplication())
 
@@ -460,8 +629,18 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
+    private fun releaseActiveMicAndMaybeResumeWake() {
+        wakeWordEngine.abandonActiveVoiceAudioFocus()
+        if (userPrefs.value.wakeDetectionEnabled && wakeModelManager.isModelReady()) {
+            MahiVoiceForegroundService.resumeWakeIfEnabled(getApplication())
+        } else {
+            MahiVoiceForegroundService.stop(getApplication())
+        }
+    }
+
     private fun startGeminiLiveSession(apiKey: String, model: String) {
-        val systemPrompt = aiEngine.buildSystemPrompt(_uiState.value.currentMood, userPrefs.value.language)
+        val memCtx = userMemoryStore.buildPromptContext(userPrefs.value.memoryConsentGranted)
+        val systemPrompt = aiEngine.buildSystemPrompt(_uiState.value.currentMood, userPrefs.value.language, memCtx)
         geminiLiveClient.setMuted(_uiState.value.isMuted)
         audioRecordManager.isInputMuted = _uiState.value.isMuted
 
@@ -471,7 +650,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         }
         val micStarted = audioRecordManager.startListening()
         if (!micStarted) {
-            MahiVoiceForegroundService.stop(getApplication())
+            releaseActiveMicAndMaybeResumeWake()
             _uiState.value = _uiState.value.copy(
                 visualState = AssistantVisualState.ERROR,
                 isGeminiLiveActive = false,
@@ -568,11 +747,37 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
                 override fun onAssistantTranscript(text: String) {
                     _uiState.update { it.copy(liveAssistantText = text) }
+                    if (text.isNotBlank() && text != lastSavedLiveAssistantText && text.length > 8) {
+                        lastSavedLiveAssistantText = text
+                    }
                 }
 
                 override fun onAssistantSpeakingChanged(isSpeaking: Boolean) {
                     val current = _uiState.value.visualState
                     if (current == AssistantVisualState.DISCONNECTED || current == AssistantVisualState.ERROR) return
+
+                    if (!isSpeaking) {
+                        val userSaid = _uiState.value.liveUserText.trim()
+                        val assistantSaid = _uiState.value.liveAssistantText.trim()
+                        if (assistantSaid.isNotBlank() && assistantSaid == lastSavedLiveAssistantText) {
+                            if (userSaid.isNotBlank()) {
+                                conversationHistoryStore.appendTurn(
+                                    "user",
+                                    userSaid,
+                                    userPrefs.value.language.id,
+                                    _uiState.value.currentMood.name
+                                )
+                            }
+                            conversationHistoryStore.appendTurn(
+                                "assistant",
+                                assistantSaid,
+                                userPrefs.value.language.id,
+                                _uiState.value.currentMood.name
+                            )
+                            _activeHistoryThreadId.value = conversationHistoryStore.activeThreadId
+                            lastSavedLiveAssistantText = ""
+                        }
+                    }
 
                     if (!isSpeaking && !_uiState.value.isContinuousMode && geminiLiveClient.connectionPhase.value != GeminiLiveConnectionPhase.RECONNECTING) {
                         // Continuous mode explicitly OFF -> stop listening after reply finishes
@@ -637,7 +842,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                     // STRICT RULE: Never silently fall back from Gemini Live audio-to-audio to text-only mode!
                     audioRecordManager.onPcmAudioFrame = null
                     audioRecordManager.stopListening()
-                    MahiVoiceForegroundService.stop(getApplication())
+                    releaseActiveMicAndMaybeResumeWake()
                     _uiState.update {
                         it.copy(
                             visualState = AssistantVisualState.ERROR,
@@ -654,7 +859,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 override fun onDisconnected() {
                     audioRecordManager.onPcmAudioFrame = null
                     audioRecordManager.stopListening()
-                    MahiVoiceForegroundService.stop(getApplication())
+                    releaseActiveMicAndMaybeResumeWake()
                     _uiState.update {
                         it.copy(
                             visualState = AssistantVisualState.DISCONNECTED,
@@ -677,7 +882,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 speechRecognitionManager.isContinuousMode = _uiState.value.isContinuousMode && !userPrefs.value.pushToTalkMode
                 val sttOk = speechRecognitionManager.startListening()
                 if (!micOk && !sttOk) {
-                    MahiVoiceForegroundService.stop(getApplication())
+                    releaseActiveMicAndMaybeResumeWake()
                     _uiState.value = _uiState.value.copy(
                         visualState = AssistantVisualState.ERROR,
                         isMicActivelyCapturing = false,
@@ -693,7 +898,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start voice session", e)
-                MahiVoiceForegroundService.stop(getApplication())
+                releaseActiveMicAndMaybeResumeWake()
                 _uiState.value = _uiState.value.copy(
                     visualState = AssistantVisualState.ERROR,
                     isMicActivelyCapturing = false,
@@ -711,7 +916,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         speechRecognitionManager.stopListening()
         speechSynthesizer.stop()
         geminiLiveClient.disconnect()
-        MahiVoiceForegroundService.stop(getApplication())
+        releaseActiveMicAndMaybeResumeWake()
         _uiState.value = _uiState.value.copy(
             visualState = AssistantVisualState.DISCONNECTED,
             isGeminiLiveActive = false,
@@ -810,6 +1015,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
             try {
                 val mood = _uiState.value.currentMood
                 val lang = userPrefs.value.language
+                val memCtx = userMemoryStore.buildPromptContext(userPrefs.value.memoryConsentGranted)
                 val response = aiEngine.sendMessageWithProvider(
                     provider = activeProvider,
                     apiKey = apiKey,
@@ -817,8 +1023,13 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                     baseUrl = activeConfig.customBaseUrl,
                     userMessage = query,
                     mood = mood,
-                    language = lang
+                    language = lang,
+                    memoryContext = memCtx
                 )
+
+                conversationHistoryStore.appendTurn("user", query, lang.id, mood.name)
+                conversationHistoryStore.appendTurn("assistant", response.replyText, lang.id, mood.name)
+                _activeHistoryThreadId.value = conversationHistoryStore.activeThreadId
 
                 if (response.toolAction != null) {
                     val toolResult = toolsManager.execute(response.toolAction)
@@ -1053,11 +1264,62 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                     sendAuthorizedWhatsAppReply(matchingWa.key, matchingWa.senderTitle, routed.message)
                 }
             }
+            is RoutedVoiceCommand.AnalyzeScreen -> {
+                val res = screenVisionManager.readAndExplainScreen(currentVisionAiConfig(), routed.question)
+                ok = res.isSuccess
+                cardTitle = "Screen Vision"
+                outcomeText = res.getOrElse { it.localizedMessage ?: "Screen Vision unavailable" }
+                _screenAiAnalysis.value = outcomeText
+                _visionAnswer.value = outcomeText
+            }
+            is RoutedVoiceCommand.AnalyzeScreenshot -> {
+                val res = screenshotVisionManager.captureAndAnalyzeScreenshot(currentVisionAiConfig(), routed.question)
+                ok = res.isSuccess
+                cardTitle = "Screenshot Vision"
+                outcomeText = res.getOrElse { it.localizedMessage ?: "Screenshot capture unavailable" }
+                _visionAnswer.value = outcomeText
+                screenshotVisionManager.lastScreenshot.value?.let {
+                    visualQuestionAnswerManager.setActiveImage(it)
+                }
+            }
+            is RoutedVoiceCommand.DescribeCameraVision -> {
+                val res = cameraVisionManager.describeCameraView(currentVisionAiConfig(), routed.question)
+                ok = res.isSuccess
+                cardTitle = "Camera Vision"
+                outcomeText = res.getOrElse {
+                    _requestedTab.value = "LENS"
+                    it.localizedMessage ?: "Open Neural Lens so camera frame is active."
+                }
+                _visionAnswer.value = outcomeText
+            }
+            RoutedVoiceCommand.AnalyzeNotifications -> {
+                val res = notificationUnderstandingManager.summarizeActiveNotifications(getApplication(), currentVisionAiConfig())
+                ok = res.isSuccess
+                cardTitle = "Notification Digest"
+                outcomeText = res.getOrElse { it.localizedMessage ?: "Notification access required" }
+            }
+            is RoutedVoiceCommand.SmartControl -> {
+                val segments = routed.chainedSteps.ifEmpty { smartphoneControlManager.splitChainedCommands(routed.rawPhrase) }
+                val outcome = smartphoneControlManager.executeChainedCommands(segments) { stepPhrase ->
+                    executeSingleChainedControlStep(stepPhrase)
+                }
+                ok = outcome.success
+                cardTitle = "Smart Control"
+                outcomeText = outcome.message
+                refreshSmartControlTelemetry()
+            }
+        }
+
+        val effectiveUser = originalUtterance.ifBlank { _uiState.value.liveUserText }
+        if (effectiveUser.isNotBlank()) {
+            conversationHistoryStore.appendTurn("user", effectiveUser, userPrefs.value.language.id, _uiState.value.currentMood.name)
+            conversationHistoryStore.appendTurn("assistant", outcomeText, userPrefs.value.language.id, _uiState.value.currentMood.name)
+            _activeHistoryThreadId.value = conversationHistoryStore.activeThreadId
         }
 
         _uiState.update { cur ->
             cur.copy(
-                liveUserText = originalUtterance.ifBlank { cur.liveUserText },
+                liveUserText = effectiveUser,
                 liveAssistantText = outcomeText,
                 lastExecutedTool = ToolExecutionResult(
                     actionName = cardTitle,
@@ -1070,6 +1332,26 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         }
         if (!_uiState.value.isMuted && !_uiState.value.isGeminiLiveActive) {
             speakText(outcomeText)
+        }
+    }
+
+    private suspend fun executeSingleChainedControlStep(stepPhrase: String): AutomationOutcome {
+        smartphoneControlManager.handleDirectControlPhrase(stepPhrase)?.let { return it }
+        return when (val sub = VoiceCommandRouter.parseCommand(stepPhrase)) {
+            is RoutedVoiceCommand.LaunchApp -> {
+                val r = appLauncherManager.launchApp(sub.appName, openStoreOrWebIfMissing = true)
+                AutomationOutcome(r.success, r.message, r.verificationDetail)
+            }
+            is RoutedVoiceCommand.ExecuteGesture -> MahiAccessibilityService.executeGestureIntent(sub.gesture)
+            RoutedVoiceCommand.OpenGoogle -> {
+                val r = appLauncherManager.openGoogleApp()
+                AutomationOutcome(r.success, r.message, r.verificationDetail)
+            }
+            is RoutedVoiceCommand.OpenWebsite -> {
+                val r = appLauncherManager.openWebsite(sub.url)
+                AutomationOutcome(r.success, r.message, r.verificationDetail)
+            }
+            else -> AutomationOutcome(false, "Unsupported step: $stepPhrase")
         }
     }
 
@@ -1269,7 +1551,8 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         aiEngine.currentLanguage = language
         speechSynthesizer.setSpeechLanguage(language.ttsLanguageTag)
         speechRecognitionManager.preferredLanguageTag = language.ttsLanguageTag
-        geminiLiveClient.updateSystemInstruction(aiEngine.buildSystemPrompt(_uiState.value.currentMood, language))
+        val memCtx = userMemoryStore.buildPromptContext(userPrefs.value.memoryConsentGranted)
+        geminiLiveClient.updateSystemInstruction(aiEngine.buildSystemPrompt(_uiState.value.currentMood, language, memCtx))
     }
 
     fun setThemeMode(themeMode: AppThemeMode) {
@@ -1284,7 +1567,111 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         speechSynthesizer.speak(text)
     }
 
-    // --- Neural Lens ---
+    // --- Part 1: Wake Up Detection, 5-Sample Enrollment, Vosk Model & Mic Test ---
+
+    fun setWakeDetectionEnabled(enabled: Boolean) {
+        val app = getApplication<Application>()
+        if (enabled) {
+            val hasAudio = ContextCompat.checkSelfPermission(
+                app,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!hasAudio) {
+                _wakeErrorMessage.value = "Grant Microphone permission before enabling Wake Up Detection."
+                preferencesStore.setWakeDetectionEnabled(false)
+                return
+            }
+            if (!wakeModelManager.isModelReady()) {
+                _wakeErrorMessage.value = "Download the offline Vosk model (~40 MB) first, then enable Wake Up Detection."
+                preferencesStore.setWakeDetectionEnabled(false)
+                return
+            }
+            preferencesStore.setWakeDetectionEnabled(true)
+            _wakeErrorMessage.value = null
+            wakeWordEngine.stopMicTest()
+            MahiVoiceForegroundService.startWakeDetection(app)
+        } else {
+            preferencesStore.setWakeDetectionEnabled(false)
+            wakeWordEngine.stopAll()
+            MahiVoiceForegroundService.disableWakeDetection(app)
+        }
+    }
+
+    fun downloadWakeModel() {
+        viewModelScope.launch {
+            val res = wakeModelManager.downloadAndInstallModel()
+            if (res.isSuccess && userPrefs.value.wakeDetectionEnabled) {
+                MahiVoiceForegroundService.startWakeDetection(getApplication())
+            }
+        }
+    }
+
+    fun deleteWakeModel() {
+        setWakeDetectionEnabled(false)
+        wakeModelManager.deleteModel()
+    }
+
+    fun recordWakeEnrollmentSample() {
+        val app = getApplication<Application>()
+        val hasAudio = ContextCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (!hasAudio) {
+            _wakeErrorMessage.value = "Microphone permission required for voice calibration."
+            return
+        }
+        val resumeWakeAfter = MahiVoiceForegroundService.isWakeServiceActive.value
+        if (resumeWakeAfter) {
+            MahiVoiceForegroundService.pauseWakeForActiveSession(app)
+        }
+        wakeWordEngine.captureEnrollmentSample {
+            if (resumeWakeAfter && userPrefs.value.wakeDetectionEnabled) {
+                MahiVoiceForegroundService.resumeWakeIfEnabled(app)
+            }
+        }
+    }
+
+    fun resetWakeEnrollment() {
+        wakeEnrollmentStore.resetEnrollment()
+    }
+
+    fun toggleMicTest() {
+        val app = getApplication<Application>()
+        if (wakeWordEngine.micTest.value.isTesting) {
+            wakeWordEngine.stopMicTest()
+            if (userPrefs.value.wakeDetectionEnabled && wakeModelManager.isModelReady()) {
+                MahiVoiceForegroundService.resumeWakeIfEnabled(app)
+            }
+            return
+        }
+        val hasAudio = ContextCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (!hasAudio) {
+            _wakeErrorMessage.value = "Grant Microphone permission to test microphone."
+            return
+        }
+        if (MahiVoiceForegroundService.isWakeServiceActive.value) {
+            MahiVoiceForegroundService.pauseWakeForActiveSession(app)
+        }
+        wakeWordEngine.startMicTest()
+    }
+
+    fun openBatteryUnrestrictedSettings() {
+        smartphoneControlManager.quickSettingsManager.openBatteryOptimizationSettings()
+    }
+
+    // --- Neural Lens & Smart Intelligence Vision (All 10 Managers) ---
+
+    private fun currentVisionAiConfig(): VisionAiConfig {
+        val state = apiManagerState.value
+        val provider = state.activeProvider
+        val cfg = state.activeConfig
+        val apiKey = secureKeyStore.getActiveDecryptedKey(provider).orEmpty()
+        return VisionAiConfig(
+            provider = provider,
+            apiKey = apiKey,
+            model = cfg.selectedModel,
+            baseUrl = cfg.customBaseUrl,
+            language = userPrefs.value.language
+        )
+    }
 
     fun askVisionQuestion(question: String) {
         val state = apiManagerState.value
@@ -1301,6 +1688,11 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         _visionError.value = null
         viewModelScope.launch {
             try {
+                neuralLensAnalyzer.latestCapturedBitmap?.let { bmp ->
+                    if (!visualQuestionAnswerManager.hasActiveImage()) {
+                        visualQuestionAnswerManager.setActiveImage(bmp)
+                    }
+                }
                 val answer = neuralLensAnalyzer.askAiAboutVision(
                     provider = provider,
                     apiKey = apiKey,
@@ -1322,20 +1714,302 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         _isVisionLoading.value = true
         _visionError.value = null
         viewModelScope.launch {
-            val snap = neuralLensAnalyzer.loadAndAnalyzeUri(getApplication(), uri)
-            if (snap == null) {
-                _visionError.value = "Could not decode selected photo."
+            val res = galleryAnalysisManager.analyzeSelectedImage(
+                context = getApplication(),
+                uri = uri,
+                aiConfig = currentVisionAiConfig()
+            )
+            res.onSuccess { (bmp, answer) ->
+                visualQuestionAnswerManager.setActiveImage(bmp)
+                _visionAnswer.value = answer
+            }.onFailure { err ->
+                _visionError.value = err.localizedMessage ?: "Could not decode selected photo."
+            }
+            _isVisionLoading.value = false
+        }
+    }
+
+    fun identifyObjectsInLens() {
+        _isVisionLoading.value = true
+        _visionError.value = null
+        viewModelScope.launch {
+            val res = objectRecognitionManager.identifyObjects(currentVisionAiConfig())
+            res.onSuccess { _visionAnswer.value = it }
+                .onFailure { _visionError.value = it.localizedMessage }
+            _isVisionLoading.value = false
+        }
+    }
+
+    fun recognizeSceneInLens() {
+        _isVisionLoading.value = true
+        _visionError.value = null
+        viewModelScope.launch {
+            val res = sceneRecognitionManager.recognizeScene(currentVisionAiConfig())
+            res.onSuccess { _visionAnswer.value = it }
+                .onFailure { _visionError.value = it.localizedMessage }
+            _isVisionLoading.value = false
+        }
+    }
+
+    fun readAndExplainLiveScreen() {
+        _isVisionLoading.value = true
+        _visionError.value = null
+        viewModelScope.launch {
+            val res = screenVisionManager.readAndExplainScreen(currentVisionAiConfig())
+            res.onSuccess {
+                _visionAnswer.value = it
+                _screenAiAnalysis.value = it
+            }.onFailure {
+                _visionError.value = it.localizedMessage
+            }
+            _isVisionLoading.value = false
+        }
+    }
+
+    fun captureAndAnalyzeScreenshot() {
+        _isVisionLoading.value = true
+        _visionError.value = null
+        viewModelScope.launch {
+            val res = screenshotVisionManager.captureAndAnalyzeScreenshot(currentVisionAiConfig())
+            res.onSuccess {
+                _visionAnswer.value = it
+                screenshotVisionManager.lastScreenshot.value?.let { bmp ->
+                    visualQuestionAnswerManager.setActiveImage(bmp)
+                }
+            }.onFailure {
+                _visionError.value = it.localizedMessage ?: screenshotVisionManager.getCaptureCapabilityNote()
+            }
+            _isVisionLoading.value = false
+        }
+    }
+
+    fun summarizeNotificationsSafely() {
+        _isVisionLoading.value = true
+        _visionError.value = null
+        viewModelScope.launch {
+            val res = notificationUnderstandingManager.summarizeActiveNotifications(getApplication(), currentVisionAiConfig())
+            res.onSuccess { _visionAnswer.value = it }
+                .onFailure { _visionError.value = it.localizedMessage }
+            _isVisionLoading.value = false
+        }
+    }
+
+    fun extractOcrFromCurrentFrame(explainWithAi: Boolean) {
+        val bmp = neuralLensAnalyzer.latestCapturedBitmap ?: screenshotVisionManager.lastScreenshot.value
+        if (bmp == null) {
+            _visionError.value = "Capture a camera frame, pick a photo, or take a screenshot first."
+            return
+        }
+        _isVisionLoading.value = true
+        _visionError.value = null
+        viewModelScope.launch {
+            val res = ocrManager.extractText(bmp, currentVisionAiConfig(), includeAiExplanation = explainWithAi)
+            res.onSuccess { out ->
+                _ocrExtractedText.value = out.extractedText
+                _visionAnswer.value = if (out.explanation.isNotBlank()) {
+                    "${out.extractedText}\n\nExplanation:\n${out.explanation}"
+                } else {
+                    out.extractedText
+                }
+            }.onFailure {
+                _visionError.value = it.localizedMessage ?: "OCR failed."
+            }
+            _isVisionLoading.value = false
+        }
+    }
+
+    fun copyOcrText(text: String) {
+        val copied = ocrManager.copyToClipboard(getApplication(), text)
+        if (copied) {
+            _uiState.update {
+                it.copy(lastExecutedTool = ToolExecutionResult("ocrCopy", "Copied OCR", "Extracted text copied to clipboard.", isSuccess = true))
+            }
+        }
+    }
+
+    fun askVisualFollowUp(question: String) {
+        _isVisionLoading.value = true
+        _visionError.value = null
+        viewModelScope.launch {
+            val res = visualQuestionAnswerManager.askFollowUp(question, currentVisionAiConfig())
+            res.onSuccess { _visionAnswer.value = it }
+                .onFailure { _visionError.value = it.localizedMessage }
+            _isVisionLoading.value = false
+        }
+    }
+
+    fun resetVisualQa() {
+        visualQuestionAnswerManager.resetConversation()
+    }
+
+    fun compareTwoImages(uriA: Uri, uriB: Uri) {
+        _isVisionLoading.value = true
+        _visionError.value = null
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val bmpA = VisionBitmapUtils.decodeUri(app, uriA)
+            val bmpB = VisionBitmapUtils.decodeUri(app, uriB)
+            if (bmpA == null || bmpB == null) {
+                _visionError.value = "Could not load both selected images."
                 _isVisionLoading.value = false
                 return@launch
             }
-            val apiKey = secureKeyStore.getActiveDecryptedKey(apiManagerState.value.activeProvider)
-            if (apiKey.isNullOrBlank()) {
-                _visionAnswer.value = neuralLensAnalyzer.formatOfflineMlKitSummary(userPrefs.value.language)
-                _isVisionLoading.value = false
-            } else {
-                askVisionQuestion("Identify objects, devices, and readable text in this image.")
+            val res = imageComparisonManager.compareImages(bmpA, bmpB, currentVisionAiConfig())
+            res.onSuccess { cmp ->
+                _imageCompareResult.value = cmp
+                _visionAnswer.value = cmp.aiComparison ?: cmp.offlineDiffSummary
+            }.onFailure {
+                _visionError.value = it.localizedMessage
             }
+            _isVisionLoading.value = false
         }
+    }
+
+    // --- Part 3: Conversation History & Consent-Gated User Memory ---
+
+    fun selectHistoryThread(threadId: String) {
+        val thread = conversationHistoryStore.selectThread(threadId) ?: return
+        _activeHistoryThreadId.value = thread.id
+        val lastUser = thread.turns.lastOrNull { it.role == "user" }?.text.orEmpty()
+        val lastAi = thread.turns.lastOrNull { it.role == "assistant" }?.text.orEmpty()
+        _uiState.update {
+            it.copy(
+                liveUserText = lastUser,
+                liveAssistantText = lastAi.ifBlank { it.liveAssistantText }
+            )
+        }
+    }
+
+    fun startNewHistoryThread() {
+        val created = conversationHistoryStore.startNewThread(
+            languageId = userPrefs.value.language.id,
+            moodName = _uiState.value.currentMood.name
+        )
+        _activeHistoryThreadId.value = created.id
+        _uiState.update {
+            it.copy(
+                liveUserText = "",
+                liveAssistantText = "Started a fresh conversation thread!"
+            )
+        }
+    }
+
+    fun deleteHistoryThread(threadId: String) {
+        conversationHistoryStore.deleteThread(threadId)
+        _activeHistoryThreadId.value = conversationHistoryStore.activeThreadId
+    }
+
+    fun clearAllHistory() {
+        conversationHistoryStore.clearAllHistory()
+        _activeHistoryThreadId.value = null
+    }
+
+    fun setMemoryConsentGranted(enabled: Boolean) {
+        preferencesStore.setMemoryConsentGranted(enabled)
+        val memCtx = userMemoryStore.buildPromptContext(enabled)
+        geminiLiveClient.updateSystemInstruction(aiEngine.buildSystemPrompt(_uiState.value.currentMood, userPrefs.value.language, memCtx))
+    }
+
+    fun updateMemoryProfileFields(name: String, langNote: String, tone: String) {
+        userMemoryStore.updateProfileFields(
+            consentGranted = userPrefs.value.memoryConsentGranted,
+            userName = name,
+            preferredLanguageNote = langNote,
+            tonePreference = tone
+        )
+        val memCtx = userMemoryStore.buildPromptContext(userPrefs.value.memoryConsentGranted)
+        geminiLiveClient.updateSystemInstruction(aiEngine.buildSystemPrompt(_uiState.value.currentMood, userPrefs.value.language, memCtx))
+    }
+
+    fun addOrEditMemoryFact(category: String, content: String, existingId: String?) {
+        userMemoryStore.addOrUpdateFact(userPrefs.value.memoryConsentGranted, category, content, existingId)
+        val memCtx = userMemoryStore.buildPromptContext(userPrefs.value.memoryConsentGranted)
+        geminiLiveClient.updateSystemInstruction(aiEngine.buildSystemPrompt(_uiState.value.currentMood, userPrefs.value.language, memCtx))
+    }
+
+    fun deleteMemoryFact(factId: String) {
+        userMemoryStore.deleteFact(factId)
+        val memCtx = userMemoryStore.buildPromptContext(userPrefs.value.memoryConsentGranted)
+        geminiLiveClient.updateSystemInstruction(aiEngine.buildSystemPrompt(_uiState.value.currentMood, userPrefs.value.language, memCtx))
+    }
+
+    fun forgetAllMemory() {
+        userMemoryStore.forgetEverything()
+        preferencesStore.setMemoryConsentGranted(false)
+        geminiLiveClient.updateSystemInstruction(aiEngine.buildSystemPrompt(_uiState.value.currentMood, userPrefs.value.language, ""))
+    }
+
+    // --- Part 4: Smart Smartphone Control ---
+
+    fun refreshSmartControlTelemetry() {
+        _batteryInfo.value = smartphoneControlManager.batteryManager.getBatteryInfo()
+        _storageInfo.value = smartphoneControlManager.storageManager.getStorageInfo()
+        _networkInfo.value = smartphoneControlManager.networkManager.getNetworkInfo()
+        _deviceInfo.value = smartphoneControlManager.deviceInfoManager.getDeviceInfo()
+        _volumeLevels.value = smartphoneControlManager.volumeManager.getAllLevels()
+        _brightnessPercent.value = deviceControlHelper.getBrightnessPercent()
+        _canWriteSettings.value = deviceControlHelper.canWriteSystemSettings()
+    }
+
+    fun setFlashlightEnabled(enabled: Boolean) {
+        val res = toolsManager.execute(ToolAction("toggleFlashlight", mapOf("state" to if (enabled) "on" else "off")))
+        _isFlashlightOn.value = enabled
+        _smartControlStatus.value = res.message
+    }
+
+    fun setVolumeStream(stream: VolumeStreamType, percent: Int) {
+        val out = smartphoneControlManager.volumeManager.setStreamPercent(stream, percent)
+        _volumeLevels.value = smartphoneControlManager.volumeManager.getAllLevels()
+        _smartControlStatus.value = out.message
+    }
+
+    fun toggleMuteMedia(mute: Boolean) {
+        val out = smartphoneControlManager.volumeManager.muteMedia(mute)
+        _volumeLevels.value = smartphoneControlManager.volumeManager.getAllLevels()
+        _smartControlStatus.value = out.message
+    }
+
+    fun setBrightnessPercent(percent: Int) {
+        val out = deviceControlHelper.setBrightnessPercent(percent)
+        _brightnessPercent.value = deviceControlHelper.getBrightnessPercent()
+        _canWriteSettings.value = deviceControlHelper.canWriteSystemSettings()
+        _smartControlStatus.value = out.message
+    }
+
+    fun openQuickSettingsShade() {
+        _smartControlStatus.value = smartphoneControlManager.quickSettingsManager.openQuickSettingsShade().message
+    }
+
+    fun openNotificationShade() {
+        _smartControlStatus.value = smartphoneControlManager.quickSettingsManager.openNotificationShade().message
+    }
+
+    fun openWifiPanel() {
+        _smartControlStatus.value = smartphoneControlManager.quickSettingsManager.openInternetOrWirelessPanel().message
+    }
+
+    fun openBluetoothPanel() {
+        _smartControlStatus.value = smartphoneControlManager.quickSettingsManager.openBluetoothSettings().message
+    }
+
+    fun openMobileDataSettings() {
+        _smartControlStatus.value = smartphoneControlManager.quickSettingsManager.openMobileDataSettings().message
+    }
+
+    fun openAirplaneSettings() {
+        _smartControlStatus.value = smartphoneControlManager.quickSettingsManager.openAirplaneModeSettings().message
+    }
+
+    fun openNfcPanel() {
+        _smartControlStatus.value = smartphoneControlManager.quickSettingsManager.openNfcSettings().message
+    }
+
+    fun openWriteSettingsPermission() {
+        deviceControlHelper.openWriteSettingsPermission()
+    }
+
+    fun openDndPolicySettings() {
+        smartphoneControlManager.volumeManager.openDndAccessSettings()
     }
 
     // --- AI Search & Deep Research ---
@@ -1726,13 +2400,18 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     override fun onCleared() {
         super.onCleared()
         pendingTranscriptJob?.cancel()
+        wakeWordEngine.stopMicTest()
+        wakeWordEngine.abandonActiveVoiceAudioFocus()
+        if (!userPrefs.value.wakeDetectionEnabled) {
+            wakeWordEngine.stopAll()
+            MahiVoiceForegroundService.stop(getApplication())
+        }
         cameraController.releaseCamera()
         audioRecordManager.onPcmAudioFrame = null
         audioRecordManager.stopListening()
         speechRecognitionManager.release()
         speechSynthesizer.release()
         geminiLiveClient.disconnect()
-        MahiVoiceForegroundService.stop(getApplication())
         neuralLensAnalyzer.close()
         autonomousAgentEngine.stop()
         MahiAccessibilityService.stopAllGestures()

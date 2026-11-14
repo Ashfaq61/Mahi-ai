@@ -18,16 +18,23 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
@@ -46,11 +53,18 @@ import androidx.compose.ui.unit.sp
 import com.example.ai.MahiMood
 import com.example.api.AiProvider
 import com.example.api.ConnectionStatus
+import com.example.audio.MicTestSnapshot
+import com.example.audio.WakeEngineStatus
+import com.example.audio.WakeEnrollmentState
+import com.example.audio.WakeModelState
+import com.example.audio.WakeModelStatus
 import com.example.preferences.AppLanguage
 import com.example.preferences.AppThemeMode
 import com.example.ui.theme.CyberCyan
+import com.example.ui.theme.CyberEmerald
 import com.example.ui.theme.NeonMagenta
 import com.example.ui.theme.NeonViolet
+import com.example.ui.theme.WarningAmber
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -67,7 +81,22 @@ fun SettingsModal(
     activeProvider: AiProvider = AiProvider.GEMINI,
     activeModel: String = activeProvider.defaultModels.first(),
     connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
+    wakeDetectionEnabled: Boolean = false,
+    wakeEngineStatus: WakeEngineStatus = WakeEngineStatus.OFF,
+    wakeErrorMessage: String? = null,
+    wakeEnrollmentState: WakeEnrollmentState = WakeEnrollmentState(),
+    wakeModelState: WakeModelState = WakeModelState(),
+    micTestSnapshot: MicTestSnapshot = MicTestSnapshot(),
     onOpenApiSettings: () -> Unit = {},
+    onOpenSmartControl: () -> Unit = {},
+    onOpenHistoryMemory: () -> Unit = {},
+    onToggleWakeDetection: (Boolean) -> Unit = {},
+    onRecordWakeSample: () -> Unit = {},
+    onResetWakeEnrollment: () -> Unit = {},
+    onDownloadWakeModel: () -> Unit = {},
+    onDeleteWakeModel: () -> Unit = {},
+    onToggleMicTest: () -> Unit = {},
+    onOpenBatteryUnrestrictedSettings: () -> Unit = {},
     onLanguageSelected: (AppLanguage) -> Unit = {},
     onThemeSelected: (AppThemeMode) -> Unit = {},
     onMoodSelected: (MahiMood) -> Unit,
@@ -184,6 +213,64 @@ fun SettingsModal(
                     contentDescription = "Open API Keys & Providers",
                     tint = CyberCyan
                 )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Smart Smartphone Control Card
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(colors.surfaceVariant)
+                    .border(1.dp, NeonViolet.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
+                    .clickable {
+                        onDismiss()
+                        onOpenSmartControl()
+                    }
+                    .padding(14.dp)
+                    .testTag("settings_smart_control_button"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.Tune, contentDescription = null, tint = CyberCyan, modifier = Modifier.size(22.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text("Smart Smartphone Control", color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Text("Battery, Storage, Wi-Fi, 5-Stream Volume, Quick Settings & Permissions", color = colors.onSurfaceVariant, fontSize = 11.sp)
+                    }
+                }
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Open Smart Control", tint = CyberCyan)
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // History & Long-Term Memory Card
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(colors.surfaceVariant)
+                    .border(1.dp, NeonMagenta.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
+                    .clickable {
+                        onDismiss()
+                        onOpenHistoryMemory()
+                    }
+                    .padding(14.dp)
+                    .testTag("settings_memory_history_button"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.History, contentDescription = null, tint = NeonMagenta, modifier = Modifier.size(22.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text("Memory & Conversation History", color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Text("Browse past chats, consent-gated personal memory & Forget Everything", color = colors.onSurfaceVariant, fontSize = 11.sp)
+                    }
+                }
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Open Memory & History", tint = NeonMagenta)
             }
 
             Spacer(modifier = Modifier.height(18.dp))
@@ -490,6 +577,148 @@ fun SettingsModal(
                     inactiveTrackColor = colors.outline
                 )
             )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Wake Up Detection ("Hey Mahi") + 5-Sample Enrollment + Offline Model + Mic Test
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(colors.surfaceVariant)
+                    .border(1.dp, CyberCyan.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Wake Up Detection", color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = "Hands-free \"Hey Mahi\" offline detector (${wakeEngineStatus.name})",
+                            color = if (wakeDetectionEnabled) CyberEmerald else colors.onSurfaceVariant,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Switch(
+                        checked = wakeDetectionEnabled,
+                        onCheckedChange = onToggleWakeDetection,
+                        colors = SwitchDefaults.colors(checkedTrackColor = CyberCyan),
+                        modifier = Modifier.testTag("wake_detection_switch")
+                    )
+                }
+
+                if (!wakeErrorMessage.isNullOrBlank()) {
+                    Text(text = wakeErrorMessage, color = WarningAmber, fontSize = 11.sp)
+                }
+
+                // 5-Sample Enrollment Progress
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = "Voice Calibration (Phrase Tuning): ${wakeEnrollmentState.completedCount}/${wakeEnrollmentState.requiredSamples} samples",
+                        color = colors.onSurface,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    LinearProgressIndicator(
+                        progress = { wakeEnrollmentState.completedCount.toFloat() / wakeEnrollmentState.requiredSamples.toFloat() },
+                        color = NeonMagenta,
+                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp))
+                    )
+                    Text(text = wakeEnrollmentState.lastFeedback, color = colors.onSurfaceVariant, fontSize = 11.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = onRecordWakeSample,
+                            enabled = !wakeEnrollmentState.isRecordingSample && !wakeEnrollmentState.isComplete,
+                            colors = ButtonDefaults.buttonColors(containerColor = NeonMagenta),
+                            modifier = Modifier.weight(1f).testTag("wake_record_sample_button")
+                        ) {
+                            Text(
+                                text = if (wakeEnrollmentState.isRecordingSample) "Listening…" else if (wakeEnrollmentState.isComplete) "Calibrated" else "Say \"Hey Mahi\" (${wakeEnrollmentState.completedCount + 1}/5)",
+                                fontSize = 11.sp
+                            )
+                        }
+                        OutlinedButton(onClick = onResetWakeEnrollment) {
+                            Text("Retry / Reset", fontSize = 11.sp)
+                        }
+                    }
+                }
+
+                // Offline Vosk Model Download / Status
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = "Offline Vosk Model: ${wakeModelState.status.name} (${wakeModelState.sizeLabel})",
+                        color = colors.onSurface,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    if (wakeModelState.status == WakeModelStatus.DOWNLOADING || wakeModelState.status == WakeModelStatus.EXTRACTING) {
+                        LinearProgressIndicator(
+                            progress = { wakeModelState.progressPercent / 100f },
+                            color = CyberCyan,
+                            modifier = Modifier.fillMaxWidth().height(6.dp)
+                        )
+                    }
+                    Text(text = wakeModelState.message, color = colors.onSurfaceVariant, fontSize = 11.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (wakeModelState.status != WakeModelStatus.READY) {
+                            OutlinedButton(
+                                onClick = onDownloadWakeModel,
+                                enabled = wakeModelState.status != WakeModelStatus.DOWNLOADING && wakeModelState.status != WakeModelStatus.EXTRACTING,
+                                modifier = Modifier.weight(1f).testTag("wake_download_model_button")
+                            ) {
+                                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(if (wakeModelState.status == WakeModelStatus.ERROR) "Retry Download" else "Download Model", fontSize = 11.sp)
+                            }
+                        } else {
+                            OutlinedButton(onClick = onDeleteWakeModel) {
+                                Text("Remove Offline Model", fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+
+                // Real 16kHz Microphone Test
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Mic Test (${String.format("%.0f", micTestSnapshot.dbLevel)} dB)",
+                            color = colors.onSurface,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        OutlinedButton(onClick = onToggleMicTest, modifier = Modifier.testTag("settings_mic_test_button")) {
+                            Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(if (micTestSnapshot.isTesting) "Stop Test" else "Test Mic", fontSize = 11.sp)
+                        }
+                    }
+                    LinearProgressIndicator(
+                        progress = { micTestSnapshot.rmsLevel.coerceIn(0f, 1f) },
+                        color = if (micTestSnapshot.isVoiceActive) CyberEmerald else CyberCyan,
+                        modifier = Modifier.fillMaxWidth().height(6.dp)
+                    )
+                    Text(text = micTestSnapshot.statusText, color = colors.onSurfaceVariant, fontSize = 11.sp)
+                }
+
+                // Motorola / Android 14+ Unrestricted Battery Guidance
+                OutlinedButton(
+                    onClick = onOpenBatteryUnrestrictedSettings,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.BatteryAlert, contentDescription = null, tint = WarningAmber, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Set Unrestricted Battery (Motorola / Android 14+)", fontSize = 11.sp)
+                }
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
 

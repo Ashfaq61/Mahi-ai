@@ -43,7 +43,7 @@ class SmartphoneControlManager(
             val outcome = singleStepExecutor(seg)
             results.add(outcome)
             if (idx < segments.lastIndex) {
-                delay(700L) // Give Android window transition time before scrolling/tapping the newly opened screen
+                delay(700L) // Allow window transition before scrolling/tapping the newly opened screen
             }
         }
         val allOk = results.all { it.success }
@@ -68,23 +68,39 @@ class SmartphoneControlManager(
                 val info = storageManager.getStorageInfo()
                 AutomationOutcome(true, info.summary, "StatFs verified")
             }
+            lower.contains("bluetooth") && (lower.contains("open") || lower.contains("kholo") || lower.contains("panel") || lower.contains("on") || lower.contains("off")) -> {
+                quickSettingsManager.openBluetoothSettings()
+            }
+            lower.contains("mobile data") && (lower.contains("open") || lower.contains("kholo") || lower.contains("panel") || lower.contains("on") || lower.contains("off")) -> {
+                quickSettingsManager.openMobileDataSettings()
+            }
+            lower.contains("airplane") -> {
+                quickSettingsManager.openAirplaneModeSettings()
+            }
+            lower.contains("nfc") -> {
+                quickSettingsManager.openNfcSettings()
+            }
             lower.contains("wifi") || lower.contains("internet") || lower.contains("network") -> {
-                if (lower.contains("open") || lower.contains("kholo") || lower.contains("settings")) {
+                if (lower.contains("open") || lower.contains("kholo") || lower.contains("settings") || lower.contains("panel")) {
                     quickSettingsManager.openInternetOrWirelessPanel()
                 } else {
                     val info = networkManager.getNetworkInfo()
                     AutomationOutcome(true, info.summary, "ConnectivityManager verified")
                 }
             }
-            lower.contains("phone model") || lower.contains("ka model") || lower.contains("device info") || lower.contains("android version") -> {
+            lower.contains("phone model") || lower.contains("ka model") || lower.contains("device info") ||
+                lower.contains("android version") || lower.contains("uptime") -> {
                 val info = deviceInfoManager.getDeviceInfo()
-                AutomationOutcome(true, info.summary, "Build/RAM verified")
+                AutomationOutcome(true, info.summary, "Build/RAM/Uptime verified")
             }
             lower.contains("quick settings") || lower.contains("control center") -> {
                 quickSettingsManager.openQuickSettingsShade()
             }
             lower.contains("notification panel") || lower.contains("notification shade") || lower.contains("notifications kholo") -> {
                 quickSettingsManager.openNotificationShade()
+            }
+            lower.contains("settings kholo") || lower == "open settings" || lower == "settings open karo" -> {
+                deviceControlHelper.openSettingsScreen("system")
             }
             lower.contains("mute") && !lower.contains("unmute") -> {
                 volumeManager.muteMedia(true)
@@ -107,17 +123,23 @@ class SmartphoneControlManager(
             lower.contains("volume") && number != null -> {
                 volumeManager.setStreamPercent(VolumeStreamType.MEDIA, number)
             }
+            lower.contains("volume") && (lower.contains("up") || lower.contains("barhao") || lower.contains("increase") || lower.contains("zyada")) -> {
+                volumeManager.increaseStreamPercent(VolumeStreamType.MEDIA)
+            }
+            lower.contains("volume") && (lower.contains("down") || lower.contains("kam") || lower.contains("decrease")) -> {
+                volumeManager.decreaseStreamPercent(VolumeStreamType.MEDIA)
+            }
             lower.contains("brightness") && number != null -> {
                 deviceControlHelper.setBrightnessPercent(number)
             }
             lower.contains("neeche scroll") || lower.contains("scroll down") -> {
                 MahiAccessibilityService.executeGestureIntent(
-                    VoiceGestureIntent("SWIPE_UP_SCROLL", GestureSpeed.NORMAL)
+                    VoiceGestureIntent(actionName = "SWIPE_UP_SCROLL", speed = GestureSpeed.NORMAL)
                 )
             }
             lower.contains("upar scroll") || lower.contains("scroll up") -> {
                 MahiAccessibilityService.executeGestureIntent(
-                    VoiceGestureIntent("SWIPE_DOWN_SCROLL", GestureSpeed.NORMAL)
+                    VoiceGestureIntent(actionName = "SWIPE_DOWN_SCROLL", speed = GestureSpeed.NORMAL)
                 )
             }
             else -> null
