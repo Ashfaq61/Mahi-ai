@@ -37,10 +37,23 @@ sealed class RoutedVoiceCommand {
     data class AnalyzeScreen(val question: String = "") : RoutedVoiceCommand()
     data class AnalyzeScreenshot(val question: String = "") : RoutedVoiceCommand()
     data class DescribeCameraVision(val question: String = "") : RoutedVoiceCommand()
+    data class ExtractOcr(val fromScreenshot: Boolean = false, val explainWithAi: Boolean = false) : RoutedVoiceCommand()
+    object OpenGalleryAnalysis : RoutedVoiceCommand()
+    object CompareGalleryImages : RoutedVoiceCommand()
     object AnalyzeNotifications : RoutedVoiceCommand()
 
     // Part 4: Smart Smartphone Control & Chained Commands
     data class SmartControl(val rawPhrase: String, val chainedSteps: List<String> = emptyList()) : RoutedVoiceCommand()
+
+    // Part 5: Screen Element Tap & Type
+    data class TapScreenElement(val index: Int? = null, val query: String = "") : RoutedVoiceCommand()
+    data class TypeOnScreen(
+        val targetHint: String = "",
+        val text: String,
+        val submit: Boolean = false,
+        val append: Boolean = false,
+        val clearFirst: Boolean = false
+    ) : RoutedVoiceCommand()
 
     fun deduplicationKey(): String = when (this) {
         StopEverything -> "STOP"
@@ -56,7 +69,7 @@ sealed class RoutedVoiceCommand {
         StopVideoRecording -> "STOP_VIDEO"
         is SetCameraFlash -> "SET_FLASH:$enabled"
         is SetCameraZoom -> "SET_ZOOM:$deltaStep"
-        is ExecuteGesture -> "GESTURE:${gesture.actionName}:${gesture.targetText}"
+        is ExecuteGesture -> "GESTURE:${gesture.actionName}:${gesture.targetIndex ?: gesture.targetText}"
         is PlaceCall -> "CALL:${target.lowercase()}"
         AnswerActiveCall -> "ANSWER_CALL"
         RejectActiveCall -> "REJECT_CALL"
@@ -66,8 +79,13 @@ sealed class RoutedVoiceCommand {
         is AnalyzeScreen -> "VISION_SCREEN:${question.lowercase()}"
         is AnalyzeScreenshot -> "VISION_SHOT:${question.lowercase()}"
         is DescribeCameraVision -> "VISION_CAM:${question.lowercase()}"
+        is ExtractOcr -> "VISION_OCR:$fromScreenshot:$explainWithAi"
+        OpenGalleryAnalysis -> "VISION_GALLERY"
+        CompareGalleryImages -> "VISION_COMPARE"
         AnalyzeNotifications -> "NOTIF_DIGEST"
         is SmartControl -> "SMART_CTRL:${rawPhrase.lowercase()}"
+        is TapScreenElement -> "TAP_ELEM:${index ?: query.lowercase()}"
+        is TypeOnScreen -> "TYPE_TEXT:${text.lowercase()}:$submit"
     }
 }
 
@@ -75,7 +93,12 @@ data class VoiceGestureIntent(
     val actionName: String,
     val targetText: String = "",
     val speed: GestureSpeed = GestureSpeed.NORMAL,
-    val continuous: Boolean = false
+    val continuous: Boolean = false,
+    val targetIndex: Int? = null,
+    val startX: Float? = null,
+    val startY: Float? = null,
+    val endX: Float? = null,
+    val endY: Float? = null
 )
 
 enum class GestureSpeed(val durationMs: Long, val displayName: String) {
@@ -254,8 +277,9 @@ object VoiceCommandRouter {
             return RoutedVoiceCommand.OpenGoogle
         }
 
-        // 7b. Part 2 Smart Vision & Part 4 Smart Smartphone Control (evaluated before generic app-launcher keywords)
+        // 7b. Part 2 Smart Vision, Part 5 Type/Tap & Part 4 Smart Smartphone Control (evaluated before generic app-launcher keywords)
         parseSmartVisionCommand(cleanNoWake, lower)?.let { return it }
+        parseScreenInteractionCommand(cleanNoWake, lower)?.let { return it }
         parseSmartControlPreLaunch(cleanNoWake, lower)?.let { return it }
 
         // 8. App Launch + optional follow-up gesture
@@ -342,6 +366,18 @@ object VoiceCommandRouter {
 
     private fun parseSmartVisionCommand(cleanNoWake: String, lower: String): RoutedVoiceCommand? {
         return when {
+            lower.contains("compare") && (lower.contains("image") || lower.contains("photo") || lower.contains("tasveer")) ->
+                RoutedVoiceCommand.CompareGalleryImages
+
+            lower.contains("gallery") && (lower.contains("photo") || lower.contains("image") || lower.contains("samjhao") || lower.contains("analyze") || lower.contains("open")) ->
+                RoutedVoiceCommand.OpenGalleryAnalysis
+
+            lower.contains("screenshot") && (lower.contains("ocr") || lower.contains("text padho") || lower.contains("text read") || lower.contains("text nikalo")) ->
+                RoutedVoiceCommand.ExtractOcr(fromScreenshot = true, explainWithAi = lower.contains("explain") || lower.contains("samjhao"))
+
+            lower.contains("ocr") || lower.contains("text padho") || lower.contains("text parho") || lower.contains("read text from camera") ->
+                RoutedVoiceCommand.ExtractOcr(fromScreenshot = false, explainWithAi = lower.contains("explain") || lower.contains("samjhao"))
+
             lower.contains("screenshot samjhao") || lower.contains("explain screenshot") ||
                 lower.contains("analyze screenshot") || lower.contains("take screenshot") ||
                 lower.contains("screenshot lo") ->
@@ -350,6 +386,7 @@ object VoiceCommandRouter {
             lower.contains("screen par kya") || lower.contains("screen pe kya") ||
                 lower.contains("what is on screen") || lower.contains("what's on my screen") ||
                 lower.contains("explain screen") || lower.contains("read screen") ||
+                lower == "screen dekho" || lower == "screen padho" ||
                 cleanNoWake.contains("اسکرین پر کیا") ->
                 RoutedVoiceCommand.AnalyzeScreen(cleanNoWake)
 
@@ -364,6 +401,46 @@ object VoiceCommandRouter {
 
             else -> null
         }
+    }
+
+    private fun parseScreenInteractionCommand(cleanNoWake: String, lower: String): RoutedVoiceCommand? {
+        // e.g., "search box mein Mahi AI likho aur search karo", "type Hello and send", "input box clear karo"
+        if (lower.contains("clear box") || lower.contains("clear input") || lower.contains("text hatao")) {
+            return RoutedVoiceCommand.TypeOnScreen(text = "", clearFirst = true)
+        }
+        val romanTypeRegex = Regex("^(?:(.+?)\\s+(?:mein|me|main|par|pe)\\s+)?(.+?)\\s+(?:likho|type karo)(?:\\s+(?:aur|and)\\s+(search|send|submit))?.*$", RegexOption.IGNORE_CASE)
+        romanTypeRegex.find(cleanNoWake)?.let { m ->
+            val targetHint = m.groupValues[1].trim()
+            val textBody = m.groupValues[2].trim().trim('"', '\'')
+            val submitCue = m.groupValues[3].isNotBlank() || lower.contains("aur search") || lower.contains("and search") || lower.contains("and send")
+            if (textBody.isNotBlank()) {
+                return RoutedVoiceCommand.TypeOnScreen(
+                    targetHint = targetHint,
+                    text = textBody,
+                    submit = submitCue
+                )
+            }
+        }
+        if (lower.startsWith("type ")) {
+            val shouldSubmit = lower.endsWith(" and search") || lower.endsWith(" and send") || lower.endsWith(" and submit")
+            val body = cleanNoWake.substring(5)
+                .replace(Regex("(?i)\\s+(?:and\\s+(?:search|send|submit))$"), "")
+                .trim()
+                .trim('"', '\'')
+            if (body.isNotBlank()) {
+                return RoutedVoiceCommand.TypeOnScreen(text = body, submit = shouldSubmit)
+            }
+        }
+
+        // e.g., "3 number par click karo", "tap element 4", "click 2"
+        val tapIndexRegex = Regex("(?i)(?:tap|click)\\s+(?:element\\s+|item\\s+|#)?(\\d+)|(\\d+)\\s*(?:number|no\\.?|th|st|nd|rd)?\\s*(?:par|pe)?\\s*(?:tap|click)(?:\\s+karo)?")
+        tapIndexRegex.find(cleanNoWake)?.let { m ->
+            val num = (m.groupValues[1].ifBlank { m.groupValues[2] }).toIntOrNull()
+            if (num != null && num > 0) {
+                return RoutedVoiceCommand.TapScreenElement(index = num)
+            }
+        }
+        return null
     }
 
     private fun parseSmartControlOrChainedCommand(cleanNoWake: String, lower: String): RoutedVoiceCommand? {

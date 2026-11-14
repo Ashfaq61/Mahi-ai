@@ -37,12 +37,29 @@ data class ToolExecutionResult(
     val isSuccess: Boolean = true
 )
 
+interface MahiVisionToolDelegate {
+    suspend fun captureScreenImage(question: String): ToolExecutionResult
+    suspend fun describeScreen(question: String): ToolExecutionResult
+    suspend fun analyzeScreenshot(question: String): ToolExecutionResult
+    suspend fun readTextFromCamera(explainWithAi: Boolean): ToolExecutionResult
+    suspend fun readTextFromScreenshot(explainWithAi: Boolean): ToolExecutionResult
+    suspend fun identifyObjects(): ToolExecutionResult
+    suspend fun recognizeScene(): ToolExecutionResult
+    suspend fun describeCameraView(question: String): ToolExecutionResult
+    suspend fun summarizeNotifications(): ToolExecutionResult
+    suspend fun openGalleryAnalysis(): ToolExecutionResult
+    suspend fun compareImages(): ToolExecutionResult
+    suspend fun askAboutLastImage(question: String): ToolExecutionResult
+    suspend fun confirmSensitiveAction(title: String, reason: String): Boolean
+}
+
 class MahiToolsManager(
     private val context: Context,
     private val cameraController: MahiCameraController? = null,
     private val onNavigateToCamera: (() -> Unit)? = null,
     private val onRunAiSearchSummary: ((String) -> Unit)? = null,
-    private val hasAudioPermission: () -> Boolean = { false }
+    private val hasAudioPermission: () -> Boolean = { false },
+    private val visionDelegate: MahiVisionToolDelegate? = null
 ) {
     companion object {
         private const val TAG = "MahiTools"
@@ -58,6 +75,171 @@ class MahiToolsManager(
 
     private var isTorchOn: Boolean = false
     private val appLauncher by lazy { AppLauncherManager(context) }
+
+    suspend fun executeAsync(action: ToolAction): ToolExecutionResult {
+        return try {
+            when (action.name.lowercase().trim()) {
+                "readscreen" -> {
+                    val res = MahiAccessibilityService.readScreenWithRetry(context)
+                    res.fold(
+                        onSuccess = { snap ->
+                            ToolExecutionResult(
+                                actionName = "readScreen",
+                                displayTitle = "Screen Read (${snap.elements.size})",
+                                message = snap.readableSummary,
+                                isSuccess = true
+                            )
+                        },
+                        onFailure = { err ->
+                            ToolExecutionResult(
+                                actionName = "readScreen",
+                                displayTitle = "Read Screen",
+                                message = err.localizedMessage ?: "Enable Mahi Accessibility Service to read screen.",
+                                isSuccess = false
+                            )
+                        }
+                    )
+                }
+
+                "tapelement" -> {
+                    val index = action.params["index"]?.toIntOrNull()
+                    val query = action.params["query"] ?: action.params["targetText"]
+                    val viewId = action.params["viewId"]
+                    val x = action.params["x"]?.toFloatOrNull()
+                    val y = action.params["y"]?.toFloatOrNull()
+                    val out = MahiAccessibilityService.tapElement(
+                        context = context,
+                        index = index,
+                        query = query?.takeIf { it.isNotBlank() },
+                        viewId = viewId?.takeIf { it.isNotBlank() },
+                        x = x,
+                        y = y
+                    )
+                    ToolExecutionResult(
+                        actionName = "tapElement",
+                        displayTitle = "Tap Element",
+                        message = out.message,
+                        isSuccess = out.success
+                    )
+                }
+
+                "typetext" -> {
+                    val index = action.params["index"]?.toIntOrNull()
+                    val query = action.params["query"] ?: action.params["targetText"]
+                    val text = action.params["text"] ?: ""
+                    val append = action.params["append"]?.equals("true", ignoreCase = true) == true
+                    val clearFirst = action.params["clearFirst"]?.equals("true", ignoreCase = true) == true
+                    val submit = action.params["submit"]?.equals("true", ignoreCase = true) == true
+
+                    val snap = MahiAccessibilityService.screenSnapshot.value
+                    if (submit && isSensitiveSubmitContext(query, text, snap) && visionDelegate != null) {
+                        val approved = visionDelegate.confirmSensitiveAction(
+                            title = "Confirm Send / Submit",
+                            reason = "Allow Mahi to type \"$text\" and submit on ${snap.packageName.ifBlank { "current app" }}?"
+                        )
+                        if (!approved) {
+                            return ToolExecutionResult(
+                                actionName = "typeText",
+                                displayTitle = "Action Cancelled",
+                                message = "Cancelled sending/submitting \"$text\" because confirmation was declined.",
+                                isSuccess = false
+                            )
+                        }
+                    }
+
+                    val out = MahiAccessibilityService.typeText(
+                        context = context,
+                        index = index,
+                        query = query?.takeIf { it.isNotBlank() },
+                        text = text,
+                        append = append,
+                        clearFirst = clearFirst,
+                        submit = submit
+                    )
+                    ToolExecutionResult(
+                        actionName = "typeText",
+                        displayTitle = if (submit) "Typed & Submitted" else "Typed Text",
+                        message = out.message,
+                        isSuccess = out.success
+                    )
+                }
+
+                "capturescreenimage" -> {
+                    val q = action.params["question"].orEmpty()
+                    visionDelegate?.captureScreenImage(q) ?: run {
+                        ToolExecutionResult(
+                            actionName = "captureScreenImage",
+                            displayTitle = "Screen Image",
+                            message = "Screen image capture delegate unavailable.",
+                            isSuccess = false
+                        )
+                    }
+                }
+
+                "describescreen" -> visionDelegate?.describeScreen(action.params["question"].orEmpty())
+                    ?: ToolExecutionResult("describeScreen", "Screen Vision", "Vision delegate unavailable.", isSuccess = false)
+
+                "analyzescreenshot" -> visionDelegate?.analyzeScreenshot(action.params["question"].orEmpty())
+                    ?: ToolExecutionResult("analyzeScreenshot", "Screenshot Vision", "Vision delegate unavailable.", isSuccess = false)
+
+                "readtextfromcamera" -> visionDelegate?.readTextFromCamera(
+                    action.params["explain"]?.equals("true", ignoreCase = true) == true
+                ) ?: ToolExecutionResult("readTextFromCamera", "Camera OCR", "Vision delegate unavailable.", isSuccess = false)
+
+                "readtextfromscreenshot" -> visionDelegate?.readTextFromScreenshot(
+                    action.params["explain"]?.equals("true", ignoreCase = true) == true
+                ) ?: ToolExecutionResult("readTextFromScreenshot", "Screenshot OCR", "Vision delegate unavailable.", isSuccess = false)
+
+                "identifyobjects" -> visionDelegate?.identifyObjects()
+                    ?: ToolExecutionResult("identifyObjects", "Object Recognition", "Vision delegate unavailable.", isSuccess = false)
+
+                "recognizescene" -> visionDelegate?.recognizeScene()
+                    ?: ToolExecutionResult("recognizeScene", "Scene Recognition", "Vision delegate unavailable.", isSuccess = false)
+
+                "describecameraview" -> visionDelegate?.describeCameraView(action.params["question"].orEmpty())
+                    ?: ToolExecutionResult("describeCameraView", "Camera Vision", "Vision delegate unavailable.", isSuccess = false)
+
+                "summarizenotifications" -> visionDelegate?.summarizeNotifications()
+                    ?: execute(action.copy(name = "readNotifications"))
+
+                "opengalleryanalysis" -> visionDelegate?.openGalleryAnalysis()
+                    ?: ToolExecutionResult("openGalleryAnalysis", "Gallery Analysis", "Vision delegate unavailable.", isSuccess = false)
+
+                "compareimages" -> visionDelegate?.compareImages()
+                    ?: ToolExecutionResult("compareImages", "Compare Images", "Vision delegate unavailable.", isSuccess = false)
+
+                "askaboutlastimage" -> visionDelegate?.askAboutLastImage(action.params["question"].orEmpty())
+                    ?: ToolExecutionResult("askAboutLastImage", "Visual Q&A", "Vision delegate unavailable.", isSuccess = false)
+
+                else -> execute(action)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in executeAsync ${action.name}", e)
+            ToolExecutionResult(
+                actionName = action.name,
+                displayTitle = "Action Failed",
+                message = e.localizedMessage ?: "Failed to execute action",
+                isSuccess = false
+            )
+        }
+    }
+
+    private fun isSensitiveSubmitContext(query: String?, text: String, snap: com.example.automation.ScreenSnapshot): Boolean {
+        val pkg = snap.packageName.lowercase()
+        val q = query.orEmpty().lowercase()
+        val t = text.lowercase()
+        val isSearchBox = q.contains("search") || q.contains("find") || q.contains("url") || q.contains("address")
+        if (isSearchBox && !pkg.contains("bank") && !pkg.contains("pay")) return false
+
+        val sensitivePackages = listOf(
+            "whatsapp", "mms", "messaging", "telegram", "orca", "instagram",
+            "gmail", "email", "bank", "pay", "easypaisa", "jazzcash", "sadapay", "nayapay"
+        )
+        if (sensitivePackages.any { pkg.contains(it) }) return true
+
+        val sensitiveKeywords = listOf("send", "reply", "pay", "transfer", "checkout", "delete", "confirm order")
+        return sensitiveKeywords.any { q.contains(it) || t.contains(it) }
+    }
 
     fun execute(action: ToolAction): ToolExecutionResult {
         return try {
@@ -256,8 +438,14 @@ class MahiToolsManager(
                     val outcome = MahiAccessibilityService.executeGestureIntent(
                         VoiceGestureIntent(
                             actionName = gestureAction,
-                            targetText = targetText
-                        )
+                            targetText = targetText,
+                            targetIndex = action.params["targetIndex"]?.toIntOrNull(),
+                            startX = action.params["startX"]?.toFloatOrNull(),
+                            startY = action.params["startY"]?.toFloatOrNull(),
+                            endX = action.params["endX"]?.toFloatOrNull(),
+                            endY = action.params["endY"]?.toFloatOrNull()
+                        ),
+                        context = context
                     )
                     ToolExecutionResult(
                         actionName = "screenGesture",
@@ -265,6 +453,18 @@ class MahiToolsManager(
                         message = outcome.message,
                         isSuccess = outcome.success
                     )
+                }
+
+                "tapelement" -> {
+                    val out = MahiAccessibilityService.tapElement(
+                        context = context,
+                        index = action.params["index"]?.toIntOrNull(),
+                        query = (action.params["query"] ?: action.params["targetText"])?.takeIf { it.isNotBlank() },
+                        viewId = action.params["viewId"]?.takeIf { it.isNotBlank() },
+                        x = action.params["x"]?.toFloatOrNull(),
+                        y = action.params["y"]?.toFloatOrNull()
+                    )
+                    ToolExecutionResult("tapElement", "Tap Element", out.message, isSuccess = out.success)
                 }
 
                 "searchweb" -> {
@@ -391,7 +591,7 @@ class MahiToolsManager(
                     }
                     val muteArg = action.params["mute"]?.lowercase()
                     val outcome = if (muteArg == "true" || muteArg == "false") {
-                        vm.muteMedia(muteArg == "true")
+                        vm.setStreamMute(stream, muteArg == "true")
                     } else {
                         val pct = action.params["percent"]?.toIntOrNull() ?: 50
                         vm.setStreamPercent(stream, pct)

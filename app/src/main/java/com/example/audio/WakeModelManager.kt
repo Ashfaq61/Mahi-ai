@@ -4,9 +4,11 @@ import android.content.Context
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -58,6 +60,8 @@ class WakeModelManager(private val context: Context) {
     private val _state = MutableStateFlow(inspectCurrentModelState())
     val state: StateFlow<WakeModelState> = _state.asStateFlow()
 
+    private val downloadMutex = Mutex()
+
     @Volatile
     private var downloadJob: Job? = null
 
@@ -97,7 +101,10 @@ class WakeModelManager(private val context: Context) {
             _state.value = inspectCurrentModelState()
             return@withContext Result.success(modelDirectory)
         }
-
+        if (!downloadMutex.tryLock()) {
+            return@withContext Result.failure(IllegalStateException("Offline model download is already in progress."))
+        }
+        downloadJob = currentCoroutineContext()[Job]
         val zipFile = File(modelsRoot, "$MODEL_FOLDER.zip.tmp")
         try {
             _state.value = WakeModelState(
@@ -194,6 +201,11 @@ class WakeModelManager(private val context: Context) {
             val err = e.localizedMessage ?: "Model download failed. Check connection and retry."
             _state.value = WakeModelState(WakeModelStatus.ERROR, 0, message = err)
             Result.failure(e)
+        } finally {
+            downloadJob = null
+            if (downloadMutex.isLocked) {
+                downloadMutex.unlock()
+            }
         }
     }
 

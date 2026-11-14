@@ -36,6 +36,9 @@ enum class AgentActionType {
     SWIPE_SCREEN,
     STOP_GESTURES,
     READ_SCREEN,
+    CAPTURE_SCREEN_IMAGE,
+    TAP_BY_INDEX,
+    TYPE_TEXT,
     READ_WHATSAPP,
     SEND_WHATSAPP_REPLY,
     MAKE_CALL,
@@ -166,6 +169,9 @@ class AutonomousAgentEngine(
                 actionType == AgentActionType.MAKE_CALL ||
                     combined.contains("call ") || combined.contains("dial ") -> SensitiveCategory.CALL
                 actionType == AgentActionType.SEND_WHATSAPP_REPLY ||
+                    (actionType == AgentActionType.TYPE_TEXT &&
+                        (combined.contains("send") || combined.contains("submit") || combined.contains("reply") ||
+                            combined.contains("pay") || combined.contains("transfer"))) ||
                     combined.contains("send message") || combined.contains("whatsapp reply") ||
                     combined.contains("reply to") -> SensitiveCategory.MESSAGE
                 actionType == AgentActionType.PURCHASE_ACTION ||
@@ -261,9 +267,19 @@ Return ONLY a valid JSON array.
         }
 
         if (lower.contains("youtube")) {
-            val q = lower.substringAfter("youtube").replace("search", "").replace("play", "").replace("on", "").trim()
-                .ifBlank { goal }
-            addStep("Search YouTube for '$q'", AgentActionType.YOUTUBE_SEARCH, q)
+            val q = goal
+                .replace(Regex(".*youtube(?:\\s+(?:par|pe|mein|kholo|chalao|open|aur|and))*\\b", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("\\b(search|karo|dhoondo|play|for|on)\\b", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (lower.contains("kholo") || lower.contains("open")) {
+                addStep("Open YouTube", AgentActionType.OPEN_APP, "YouTube")
+            }
+            if (q.isNotBlank() && !q.equals(goal, ignoreCase = true)) {
+                addStep("Search YouTube for '$q'", AgentActionType.YOUTUBE_SEARCH, q)
+            } else if (steps.isEmpty()) {
+                addStep("Search YouTube for '$goal'", AgentActionType.YOUTUBE_SEARCH, goal)
+            }
         }
         if (lower.contains("volume")) {
             val pct = Regex("\\d+").find(lower)?.value?.toIntOrNull()
@@ -305,7 +321,20 @@ Return ONLY a valid JSON array.
         if (lower.contains("publish") || lower.contains("post ")) {
             addStep("Publish content: $goal", AgentActionType.PUBLISH_CONTENT, goal)
         }
-        if (lower.contains("tap ") || lower.contains("click ")) {
+        val typeRegex = Regex("(?i)(?:type|likho|write)\\s+['\"]?([^'\"]+?)['\"]?(?:\\s+(?:and|aur)\\s+(?:search|submit|send))?$")
+        if (lower.contains("type ") || lower.contains("likho") || lower.contains("write ")) {
+            val textToType = typeRegex.find(goal)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+                .ifBlank { goal.substringAfter("likho").substringAfter("type ").trim() }
+            if (textToType.isNotBlank()) {
+                val shouldSubmit = lower.contains("search") || lower.contains("submit") || lower.contains("send")
+                addStep("Type '$textToType' on screen", AgentActionType.TYPE_TEXT, textToType, if (shouldSubmit) "submit" else "")
+            }
+        }
+        val tapNumMatch = Regex("(?i)(?:(\\d+)\\s*(?:number|th|st|nd|rd|item|element)?\\s*(?:par|pe)?\\s*(?:tap|click)|(?:tap|click)\\s*(?:on\\s*)?(?:element|item|number|#)?\\s*(\\d+))").find(lower)
+        if (tapNumMatch != null) {
+            val idx = tapNumMatch.groupValues[1].ifBlank { tapNumMatch.groupValues[2] }
+            addStep("Tap UI element #$idx", AgentActionType.TAP_BY_INDEX, idx)
+        } else if (lower.contains("tap ") || lower.contains("click ")) {
             val target = lower.replace("tap ", "").replace("click ", "").trim()
             addStep("Tap UI element '$target'", AgentActionType.TAP_UI_ELEMENT, target)
         }
@@ -515,12 +544,35 @@ Return ONLY a valid JSON array.
                 AutomationOutcome(true, "All gestures stopped")
             }
             AgentActionType.READ_SCREEN -> {
-                val snap = MahiAccessibilityService.refreshScreenSnapshot()
+                val snap = MahiAccessibilityService.readScreenWithRetry(context).getOrNull()
                 if (snap != null) {
                     AutomationOutcome(true, snap.readableSummary, "Captured ${snap.elements.size} UI nodes from ${snap.packageName}")
                 } else {
                     AutomationOutcome(false, "Accessibility Service not connected; enable it to read external apps.")
                 }
+            }
+            AgentActionType.CAPTURE_SCREEN_IMAGE -> {
+                val snap = MahiAccessibilityService.refreshScreenSnapshot(force = true)
+                AutomationOutcome(
+                    success = MahiAccessibilityService.isServiceEnabled(context),
+                    message = if (MahiAccessibilityService.isServiceEnabled(context)) {
+                        "Screen image capture requested (app: ${snap?.packageName.orEmpty()})"
+                    } else {
+                        "Enable Mahi Accessibility Service for screen capture."
+                    }
+                )
+            }
+            AgentActionType.TAP_BY_INDEX -> {
+                val idx = step.param.toIntOrNull()
+                MahiAccessibilityService.tapElement(context = context, index = idx)
+            }
+            AgentActionType.TYPE_TEXT -> {
+                val submit = step.secondaryParam.equals("submit", ignoreCase = true)
+                MahiAccessibilityService.typeText(
+                    context = context,
+                    text = step.param,
+                    submit = submit
+                )
             }
             AgentActionType.READ_WHATSAPP -> {
                 val waMsgs = MahiNotificationService.notifications.value.filter { it.isWhatsApp }

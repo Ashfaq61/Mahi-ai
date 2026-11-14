@@ -1,5 +1,7 @@
 package com.example.audio
 
+import android.app.ActivityManager
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -10,6 +12,8 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
+import android.os.Process
 import android.util.Log
 import com.example.MainActivity
 import com.example.WakePopupActivity
@@ -215,25 +219,42 @@ class MahiVoiceForegroundService : Service() {
         return START_STICKY
     }
 
+    private fun isAppUnlockedInForeground(): Boolean {
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val interactive = pm?.isInteractive ?: true
+        val locked = km?.isKeyguardLocked ?: false
+        if (!interactive || locked) return false
+
+        val myPid = Process.myPid()
+        val inForeground = am?.runningAppProcesses?.any { proc ->
+            proc.pid == myPid &&
+                proc.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+        } ?: false
+        return inForeground
+    }
+
     private fun handleWakeTrigger(transcript: String) {
         // Release Vosk mic BEFORE opening WakePopupActivity / MainActivity Gemini Live
         wakeEngine?.pauseForActiveVoice()
         _isWakeServiceActive.value = false
 
-        val invokedInApp = onWakeTriggered != null
-        onWakeTriggered?.invoke(transcript)
+        val canHandleDirectlyInApp = onWakeTriggered != null && isAppUnlockedInForeground()
+        if (canHandleDirectlyInApp) {
+            onWakeTriggered?.invoke(transcript)
+            return
+        }
 
-        if (!invokedInApp) {
-            val popupIntent = Intent(this, WakePopupActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                putExtra(WakePopupActivity.EXTRA_WAKE_TRANSCRIPT, transcript)
-            }
-            try {
-                startActivity(popupIntent)
-            } catch (e: Exception) {
-                Log.w(TAG, "Direct WakePopupActivity launch blocked by Android; posting high-priority notification", e)
-                postWakeFullScreenNotification(popupIntent, transcript)
-            }
+        val popupIntent = Intent(this, WakePopupActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            putExtra(WakePopupActivity.EXTRA_WAKE_TRANSCRIPT, transcript)
+        }
+        try {
+            startActivity(popupIntent)
+        } catch (e: Exception) {
+            Log.w(TAG, "Direct WakePopupActivity launch blocked by Android; posting high-priority notification", e)
+            postWakeFullScreenNotification(popupIntent, transcript)
         }
     }
 

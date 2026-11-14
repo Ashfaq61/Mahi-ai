@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VpnKey
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -50,10 +52,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -130,6 +134,9 @@ fun MahiScreen(
     val exportedPdf by viewModel.exportedPdf.collectAsStateWithLifecycle()
 
     val screenSnapshot by viewModel.screenSnapshot.collectAsStateWithLifecycle()
+    val isReadingScreen by viewModel.isReadingScreen.collectAsStateWithLifecycle()
+    val pendingPhotoPickerMode by viewModel.pendingPhotoPickerMode.collectAsStateWithLifecycle()
+    val pendingLiveConfirmation by viewModel.pendingLiveConfirmation.collectAsStateWithLifecycle()
     val notifications by viewModel.activeNotifications.collectAsStateWithLifecycle()
     val agentPlanSteps by viewModel.agentPlanSteps.collectAsStateWithLifecycle()
     val isAgentRunning by viewModel.isAgentRunning.collectAsStateWithLifecycle()
@@ -225,6 +232,41 @@ fun MahiScreen(
         hasMicPermission = micOk
         if (micOk) {
             viewModel.setWakeDetectionEnabled(true)
+        }
+    }
+
+    val singlePhotoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.analyzeVisionPhotoUri(uri)
+        }
+    }
+
+    val comparePhotosPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(2)
+    ) { uris ->
+        if (uris.size >= 2) {
+            viewModel.compareTwoImages(uris[0], uris[1])
+        } else if (uris.size == 1) {
+            viewModel.analyzeVisionPhotoUri(uris[0])
+        }
+    }
+
+    LaunchedEffect(pendingPhotoPickerMode) {
+        when (pendingPhotoPickerMode) {
+            "SINGLE" -> {
+                viewModel.consumePendingPhotoPickerMode()
+                singlePhotoPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            }
+            "COMPARE" -> {
+                viewModel.consumePendingPhotoPickerMode()
+                comparePhotosPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            }
         }
     }
 
@@ -559,6 +601,33 @@ fun MahiScreen(
                                 },
                                 onOpenChrome = { viewModel.launchAppDirect("Chrome") }
                             )
+
+                            if (isReadingScreen) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(CyberCyan.copy(alpha = 0.14f))
+                                        .border(1.dp, CyberCyan.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
+                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                        .testTag("reading_screen_indicator"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CenterFocusStrong,
+                                        contentDescription = "Reading Screen",
+                                        tint = CyberCyan,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = "Mahi is reading screen...",
+                                        color = CyberCyan,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
 
                             Spacer(modifier = Modifier.height(6.dp))
 
@@ -1152,6 +1221,45 @@ fun MahiScreen(
                     onDeleteFact = { viewModel.deleteMemoryFact(it) },
                     onForgetEverything = { viewModel.forgetAllMemory() },
                     onDismiss = { showHistoryMemoryModal = false }
+                )
+            }
+
+            pendingLiveConfirmation?.let { (confirmTitle, confirmReason) ->
+                AlertDialog(
+                    onDismissRequest = { viewModel.respondToLiveToolConfirmation(false) },
+                    containerColor = colors.surface,
+                    title = {
+                        Text(
+                            text = confirmTitle,
+                            color = WarningAmber,
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
+                    text = {
+                        Text(
+                            text = confirmReason,
+                            color = colors.onSurface,
+                            fontSize = 13.sp
+                        )
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = { viewModel.respondToLiveToolConfirmation(true) },
+                            colors = ButtonDefaults.buttonColors(containerColor = CyberEmerald),
+                            modifier = Modifier.testTag("live_confirm_approve_button")
+                        ) {
+                            Text("Confirm", fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    dismissButton = {
+                        OutlinedButton(
+                            onClick = { viewModel.respondToLiveToolConfirmation(false) },
+                            modifier = Modifier.testTag("live_confirm_deny_button")
+                        ) {
+                            Text("Cancel")
+                        }
+                    },
+                    modifier = Modifier.testTag("live_tool_confirmation_dialog")
                 )
             }
         }

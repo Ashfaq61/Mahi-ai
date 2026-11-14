@@ -140,24 +140,43 @@ class VolumeManager(private val context: Context) {
     }
 
     fun muteMedia(mute: Boolean): AutomationOutcome {
+        return setStreamMute(VolumeStreamType.MEDIA, mute)
+    }
+
+    fun setStreamMute(streamType: VolumeStreamType, mute: Boolean): AutomationOutcome {
         val am = audioManager ?: return AutomationOutcome(false, "AudioManager unavailable")
+        if ((streamType == VolumeStreamType.RINGTONE || streamType == VolumeStreamType.NOTIFICATION) &&
+            mute && !hasDndPolicyAccess()
+        ) {
+            openDndAccessSettings()
+            return AutomationOutcome(
+                false,
+                "Android requires Do Not Disturb Access to mute ${streamType.displayName}. Opened DND settings."
+            )
+        }
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 am.adjustStreamVolume(
-                    AudioManager.STREAM_MUSIC,
+                    streamType.androidStream,
                     if (mute) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE,
                     AudioManager.FLAG_SHOW_UI
                 )
             } else {
-                setStreamPercent(VolumeStreamType.MEDIA, if (mute) 0 else 55)
+                setStreamPercent(streamType, if (mute) 0 else 55)
             }
             AutomationOutcome(
                 success = true,
-                message = if (mute) "Media volume muted" else "Media volume unmuted",
-                verificationDetail = "Stream mute=$mute"
+                message = if (mute) "${streamType.displayName} volume muted" else "${streamType.displayName} volume unmuted",
+                verificationDetail = "Stream=${streamType.name} mute=$mute"
+            )
+        } catch (se: SecurityException) {
+            openDndAccessSettings()
+            AutomationOutcome(
+                false,
+                "Do Not Disturb Policy Access required to mute ${streamType.displayName}. Opened settings."
             )
         } catch (e: Exception) {
-            AutomationOutcome(false, e.localizedMessage ?: "Failed to toggle mute")
+            AutomationOutcome(false, e.localizedMessage ?: "Failed to toggle ${streamType.displayName} mute")
         }
     }
 }

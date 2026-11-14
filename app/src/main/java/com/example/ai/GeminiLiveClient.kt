@@ -277,12 +277,17 @@ class GeminiLiveClient(
             })
             put(JSONObject().apply {
                 put("name", "screenGesture")
-                put("description", "Control screen gestures: SWIPE_UP, SWIPE_DOWN, SWIPE_LEFT, SWIPE_RIGHT, FAST_SCROLL_DOWN, FAST_SCROLL_UP, SCROLL_TOP, SCROLL_BOTTOM, CONTINUOUS_SCROLL_DOWN, CONTINUOUS_SCROLL_UP, TAP_TEXT, DOUBLE_TAP, LONG_PRESS, STOP.")
+                put("description", "Control screen gestures: SWIPE_UP, SWIPE_DOWN, SWIPE_LEFT, SWIPE_RIGHT, FAST_SCROLL_DOWN, FAST_SCROLL_UP, SCROLL_TOP, SCROLL_BOTTOM, CONTINUOUS_SCROLL_DOWN, CONTINUOUS_SCROLL_UP, TAP_TEXT, DOUBLE_TAP, LONG_PRESS, STOP. Optionally specify targetIndex, targetText, or startX/startY/endX/endY.")
                 put("parameters", JSONObject().apply {
                     put("type", "OBJECT")
                     put("properties", JSONObject().apply {
                         put("action", JSONObject().apply { put("type", "STRING") })
                         put("targetText", JSONObject().apply { put("type", "STRING") })
+                        put("targetIndex", JSONObject().apply { put("type", "INTEGER") })
+                        put("startX", JSONObject().apply { put("type", "NUMBER") })
+                        put("startY", JSONObject().apply { put("type", "NUMBER") })
+                        put("endX", JSONObject().apply { put("type", "NUMBER") })
+                        put("endY", JSONObject().apply { put("type", "NUMBER") })
                     })
                     put("required", JSONArray().apply { put("action") })
                 })
@@ -405,6 +410,157 @@ class GeminiLiveClient(
                     put("properties", JSONObject().apply {
                         put("panel", JSONObject().apply { put("type", "STRING") })
                     })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "readScreen")
+                put("description", "Read the currently visible screen elements (numbered list with widget types, labels, clickable/editable/scrollable flags, and coordinates) via Accessibility. Always call this before answering what is on screen or interacting with an app.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("question", JSONObject().apply { put("type", "STRING") })
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "tapElement")
+                put("description", "Tap/click a visible UI element on the screen by 1-based element index from readScreen, text/contentDescription query, resource viewId, or x/y screen coordinates.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("index", JSONObject().apply { put("type", "INTEGER") })
+                        put("query", JSONObject().apply { put("type", "STRING") })
+                        put("viewId", JSONObject().apply { put("type", "STRING") })
+                        put("x", JSONObject().apply { put("type", "NUMBER") })
+                        put("y", JSONObject().apply { put("type", "NUMBER") })
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "typeText")
+                put("description", "Type text into a visible editable field on screen (by index, field query, or focused input), optionally appending, clearing first, or submitting (Enter/Search/Send). Refuses password fields.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("index", JSONObject().apply { put("type", "INTEGER") })
+                        put("query", JSONObject().apply { put("type", "STRING") })
+                        put("text", JSONObject().apply { put("type", "STRING") })
+                        put("append", JSONObject().apply { put("type", "BOOLEAN") })
+                        put("clearFirst", JSONObject().apply { put("type", "BOOLEAN") })
+                        put("submit", JSONObject().apply { put("type", "BOOLEAN") })
+                    })
+                    put("required", JSONArray().apply { put("text") })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "captureScreenImage")
+                put("description", "Visual fallback (Android 11+): capture a compressed screenshot of the active screen and send it for visual inspection when readScreen has no readable UI nodes (games, canvas, protected views).")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("question", JSONObject().apply { put("type", "STRING") })
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "describeScreen")
+                put("description", "Read and explain the currently open Android app screen in the user's language.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("question", JSONObject().apply { put("type", "STRING") })
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "analyzeScreenshot")
+                put("description", "Capture an active screen screenshot (API 30+) and analyze its visual layout and visible text.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("question", JSONObject().apply { put("type", "STRING") })
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "readTextFromCamera")
+                put("description", "Extract readable text (OCR in English, Hindi, Urdu) from the current camera frame in Neural Lens.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("explain", JSONObject().apply { put("type", "BOOLEAN") })
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "readTextFromScreenshot")
+                put("description", "Capture a screenshot (API 30+) and extract readable text (OCR in English, Hindi, Urdu).")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("explain", JSONObject().apply { put("type", "BOOLEAN") })
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "identifyObjects")
+                put("description", "Identify visible objects, gadgets, or products in the active Neural Lens frame.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "recognizeScene")
+                put("description", "Recognize the indoor/outdoor environment, lighting, and scene context from the active frame.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "describeCameraView")
+                put("description", "Describe what is currently visible in the Neural Lens camera view.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("question", JSONObject().apply { put("type", "STRING") })
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "summarizeNotifications")
+                put("description", "Summarize active device notifications with priority levels and automatic OTP/card redaction.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "openGalleryAnalysis")
+                put("description", "Open the zero-permission Android Photo Picker so the user can choose a gallery image for vision analysis.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "compareImages")
+                put("description", "Open the zero-permission Android Photo Picker to select two images and compare them side-by-side.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "askAboutLastImage")
+                put("description", "Ask a follow-up question about the last analyzed camera frame, screenshot, or gallery photo.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("question", JSONObject().apply { put("type", "STRING") })
+                    })
+                    put("required", JSONArray().apply { put("question") })
                 })
             })
         }
@@ -846,6 +1002,22 @@ class GeminiLiveClient(
             })
         }.toString()
         webSocket?.send(payload)
+    }
+
+    fun sendImageFrame(jpegBytes: ByteArray): Boolean {
+        if (jpegBytes.isEmpty() || !isConnected || !isSetupComplete || manualDisconnect) return false
+        val b64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+        val payload = JSONObject().apply {
+            put("realtimeInput", JSONObject().apply {
+                put("mediaChunks", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("mimeType", "image/jpeg")
+                        put("data", b64)
+                    })
+                })
+            })
+        }.toString()
+        return webSocket?.send(payload) ?: false
     }
 
     fun sendToolResponse(callId: String, name: String, resultMessage: String, success: Boolean) {

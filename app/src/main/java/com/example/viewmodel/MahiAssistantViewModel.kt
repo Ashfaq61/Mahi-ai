@@ -94,6 +94,7 @@ import com.example.research.ExportedPdfResult
 import com.example.research.ResearchEngine
 import com.example.research.ResearchPdfExporter
 import com.example.tools.MahiToolsManager
+import com.example.tools.MahiVisionToolDelegate
 import com.example.tools.ToolAction
 import com.example.tools.ToolExecutionResult
 import com.example.vision.CameraVisionManager
@@ -112,6 +113,7 @@ import com.example.vision.VisionAiConfig
 import com.example.vision.VisionBitmapUtils
 import com.example.vision.VisualQaTurn
 import com.example.vision.VisualQuestionAnswerManager
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -124,7 +126,9 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 
 enum class AssistantVisualState {
     DISCONNECTED,
@@ -185,18 +189,222 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     )
     private val commandExecutionGuard = CommandExecutionGuard(dedupWindowMs = 2_500L)
 
-    private val toolsManager = MahiToolsManager(
-        context = application,
-        cameraController = cameraController,
-        onNavigateToCamera = { _requestedTab.value = "CAMERA_STUDIO" },
-        onRunAiSearchSummary = { query -> runAiSearch(query) },
-        hasAudioPermission = {
-            ContextCompat.checkSelfPermission(
-                getApplication(),
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
+    private val toolsManager: MahiToolsManager by lazy {
+        MahiToolsManager(
+            context = application,
+            cameraController = cameraController,
+            onNavigateToCamera = { _requestedTab.value = "CAMERA_STUDIO" },
+            onRunAiSearchSummary = { query -> runAiSearch(query) },
+            hasAudioPermission = {
+                ContextCompat.checkSelfPermission(
+                    getApplication(),
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+            },
+            visionDelegate = visionToolDelegate
+        )
+    }
+
+    private val visionToolDelegate = object : MahiVisionToolDelegate {
+        override suspend fun captureScreenImage(question: String): ToolExecutionResult {
+            val captureRes = suspendCancellableCoroutine<Result<ByteArray>> { cont ->
+                MahiAccessibilityService.captureScreenJpeg(maxDim = 1024, quality = 72) { res ->
+                    if (cont.isActive) cont.resume(res)
+                }
+            }
+            return captureRes.fold(
+                onSuccess = { jpegBytes ->
+                    if (_uiState.value.isGeminiLiveActive && geminiLiveClient.isSessionActive()) {
+                        val sent = geminiLiveClient.sendImageFrame(jpegBytes)
+                        ToolExecutionResult(
+                            actionName = "captureScreenImage",
+                            displayTitle = "Screen Image Sent",
+                            message = if (sent) {
+                                "Captured current screen image (${jpegBytes.size / 1024} KB) and sent it to Gemini Live. Describe what you see now."
+                            } else {
+                                "Captured screen image, but Gemini Live session is not connected."
+                            },
+                            isSuccess = sent
+                        )
+                    } else {
+                        val analyzed = screenshotVisionManager.captureAndAnalyzeScreenshot(currentVisionAiConfig(), question)
+                        analyzed.fold(
+                            onSuccess = { answer ->
+                                _visionAnswer.value = answer
+                                screenshotVisionManager.lastScreenshot.value?.let { visualQuestionAnswerManager.setActiveImage(it) }
+                                ToolExecutionResult("captureScreenImage", "Screen Image Analyzed", answer, isSuccess = true)
+                            },
+                            onFailure = { err ->
+                                ToolExecutionResult("captureScreenImage", "Screen Image", err.localizedMessage ?: "Screenshot analysis failed", isSuccess = false)
+                            }
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    if (!MahiAccessibilityService.isServiceEnabled(getApplication())) {
+                        MahiAccessibilityService.openAccessibilitySettings(getApplication())
+                    }
+                    ToolExecutionResult(
+                        actionName = "captureScreenImage",
+                        displayTitle = "Screen Capture Unavailable",
+                        message = err.localizedMessage ?: "Enable Mahi Accessibility Service (Android 11+) or pick an image from Gallery.",
+                        isSuccess = false
+                    )
+                }
+            )
         }
-    )
+
+        override suspend fun describeScreen(question: String): ToolExecutionResult {
+            val res = screenVisionManager.readAndExplainScreen(currentVisionAiConfig(), question)
+            return res.fold(
+                onSuccess = {
+                    _screenAiAnalysis.value = it
+                    _visionAnswer.value = it
+                    ToolExecutionResult("describeScreen", "Screen Vision", it, isSuccess = true)
+                },
+                onFailure = {
+                    ToolExecutionResult("describeScreen", "Screen Vision", it.localizedMessage ?: "Screen reading unavailable", isSuccess = false)
+                }
+            )
+        }
+
+        override suspend fun analyzeScreenshot(question: String): ToolExecutionResult {
+            val res = screenshotVisionManager.captureAndAnalyzeScreenshot(currentVisionAiConfig(), question)
+            return res.fold(
+                onSuccess = {
+                    _visionAnswer.value = it
+                    screenshotVisionManager.lastScreenshot.value?.let { bmp -> visualQuestionAnswerManager.setActiveImage(bmp) }
+                    ToolExecutionResult("analyzeScreenshot", "Screenshot Vision", it, isSuccess = true)
+                },
+                onFailure = {
+                    ToolExecutionResult("analyzeScreenshot", "Screenshot Vision", it.localizedMessage ?: "Screenshot unavailable", isSuccess = false)
+                }
+            )
+        }
+
+        override suspend fun readTextFromCamera(explainWithAi: Boolean): ToolExecutionResult {
+            val bmp = neuralLensAnalyzer.latestCapturedBitmap
+            if (bmp == null) {
+                _requestedTab.value = "LENS"
+                return ToolExecutionResult("readTextFromCamera", "Camera OCR", "Opened Neural Lens—point camera at text to scan.", isSuccess = false)
+            }
+            val res = ocrManager.extractText(bmp, currentVisionAiConfig(), includeAiExplanation = explainWithAi)
+            return res.fold(
+                onSuccess = { out ->
+                    _ocrExtractedText.value = out.extractedText
+                    val msg = if (out.explanation.isNotBlank()) "${out.extractedText}\n\n${out.explanation}" else out.extractedText
+                    _visionAnswer.value = msg
+                    ToolExecutionResult("readTextFromCamera", "Camera OCR", msg, isSuccess = true)
+                },
+                onFailure = {
+                    ToolExecutionResult("readTextFromCamera", "Camera OCR", it.localizedMessage ?: "OCR failed", isSuccess = false)
+                }
+            )
+        }
+
+        override suspend fun readTextFromScreenshot(explainWithAi: Boolean): ToolExecutionResult {
+            val bmp = screenshotVisionManager.captureActiveScreenBitmap().getOrElse { err ->
+                return ToolExecutionResult("readTextFromScreenshot", "Screenshot OCR", err.localizedMessage ?: "Screenshot unavailable", isSuccess = false)
+            }
+            visualQuestionAnswerManager.setActiveImage(bmp)
+            val res = ocrManager.extractText(bmp, currentVisionAiConfig(), includeAiExplanation = explainWithAi)
+            return res.fold(
+                onSuccess = { out ->
+                    _ocrExtractedText.value = out.extractedText
+                    val msg = if (out.explanation.isNotBlank()) "${out.extractedText}\n\n${out.explanation}" else out.extractedText
+                    _visionAnswer.value = msg
+                    ToolExecutionResult("readTextFromScreenshot", "Screenshot OCR", msg, isSuccess = true)
+                },
+                onFailure = {
+                    ToolExecutionResult("readTextFromScreenshot", "Screenshot OCR", it.localizedMessage ?: "Screenshot OCR failed", isSuccess = false)
+                }
+            )
+        }
+
+        override suspend fun identifyObjects(): ToolExecutionResult {
+            val res = objectRecognitionManager.identifyObjects(currentVisionAiConfig())
+            return res.fold(
+                onSuccess = {
+                    _visionAnswer.value = it
+                    ToolExecutionResult("identifyObjects", "Object Recognition", it, isSuccess = true)
+                },
+                onFailure = {
+                    _requestedTab.value = "LENS"
+                    ToolExecutionResult("identifyObjects", "Object Recognition", it.localizedMessage ?: "Open Neural Lens to capture a frame.", isSuccess = false)
+                }
+            )
+        }
+
+        override suspend fun recognizeScene(): ToolExecutionResult {
+            val res = sceneRecognitionManager.recognizeScene(currentVisionAiConfig())
+            return res.fold(
+                onSuccess = {
+                    _visionAnswer.value = it
+                    ToolExecutionResult("recognizeScene", "Scene Recognition", it, isSuccess = true)
+                },
+                onFailure = {
+                    _requestedTab.value = "LENS"
+                    ToolExecutionResult("recognizeScene", "Scene Recognition", it.localizedMessage ?: "Open Neural Lens to capture a frame.", isSuccess = false)
+                }
+            )
+        }
+
+        override suspend fun describeCameraView(question: String): ToolExecutionResult {
+            val res = cameraVisionManager.describeCameraView(currentVisionAiConfig(), question)
+            return res.fold(
+                onSuccess = {
+                    _visionAnswer.value = it
+                    ToolExecutionResult("describeCameraView", "Camera Vision", it, isSuccess = true)
+                },
+                onFailure = {
+                    _requestedTab.value = "LENS"
+                    ToolExecutionResult("describeCameraView", "Camera Vision", it.localizedMessage ?: "Point Neural Lens camera first.", isSuccess = false)
+                }
+            )
+        }
+
+        override suspend fun summarizeNotifications(): ToolExecutionResult {
+            val res = notificationUnderstandingManager.summarizeActiveNotifications(getApplication(), currentVisionAiConfig())
+            return res.fold(
+                onSuccess = {
+                    _visionAnswer.value = it
+                    ToolExecutionResult("summarizeNotifications", "Notification Digest", it, isSuccess = true)
+                },
+                onFailure = {
+                    ToolExecutionResult("summarizeNotifications", "Notification Digest", it.localizedMessage ?: "Enable Notification Listener access.", isSuccess = false)
+                }
+            )
+        }
+
+        override suspend fun openGalleryAnalysis(): ToolExecutionResult {
+            _requestedTab.value = "LENS"
+            _pendingPhotoPickerMode.value = "SINGLE"
+            return ToolExecutionResult("openGalleryAnalysis", "Gallery Photo Picker", "Opened Neural Lens Photo Picker to choose an image.", isSuccess = true)
+        }
+
+        override suspend fun compareImages(): ToolExecutionResult {
+            _requestedTab.value = "LENS"
+            _pendingPhotoPickerMode.value = "COMPARE"
+            return ToolExecutionResult("compareImages", "Compare Two Images", "Opened Neural Lens Photo Picker to select 2 images to compare.", isSuccess = true)
+        }
+
+        override suspend fun askAboutLastImage(question: String): ToolExecutionResult {
+            val res = visualQuestionAnswerManager.askFollowUp(question, currentVisionAiConfig())
+            return res.fold(
+                onSuccess = {
+                    _visionAnswer.value = it
+                    ToolExecutionResult("askAboutLastImage", "Visual Q&A", it, isSuccess = true)
+                },
+                onFailure = {
+                    ToolExecutionResult("askAboutLastImage", "Visual Q&A", it.localizedMessage ?: "Capture or pick an image first.", isSuccess = false)
+                }
+            )
+        }
+
+        override suspend fun confirmSensitiveAction(title: String, reason: String): Boolean {
+            return requestSensitiveConfirmation(title, reason)
+        }
+    }
 
     private var pendingTranscriptJob: Job? = null
     private val liveTranscriptBuffer = StringBuilder()
@@ -241,6 +449,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
     // Screen Intelligence, Advanced Gestures, Notifications & Autonomous Agent state
     val screenSnapshot: StateFlow<ScreenSnapshot> = MahiAccessibilityService.screenSnapshot
+    val isReadingScreen: StateFlow<Boolean> = MahiAccessibilityService.isReadingScreen
     val gestureStatus: StateFlow<String> = MahiAccessibilityService.gestureStatus
     val isContinuousScrolling: StateFlow<Boolean> = MahiAccessibilityService.isContinuousScrolling
     val gestureHistory: StateFlow<List<GestureActionRecord>> = MahiAccessibilityService.gestureHistory
@@ -249,6 +458,13 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     val isAgentRunning: StateFlow<Boolean> = autonomousAgentEngine.isRunning
     val pendingSensitiveConfirmation: StateFlow<PendingSensitiveConfirmation?> = autonomousAgentEngine.pendingConfirmation
     val automationHistory: StateFlow<List<AutomationHistoryEntry>> = autonomousAgentEngine.historyStore.history
+
+    private var liveConfirmationDeferred: CompletableDeferred<Boolean>? = null
+    private val _pendingLiveConfirmation = MutableStateFlow<Pair<String, String>?>(null)
+    val pendingLiveConfirmation: StateFlow<Pair<String, String>?> = _pendingLiveConfirmation.asStateFlow()
+
+    private val _pendingPhotoPickerMode = MutableStateFlow<String?>(null)
+    val pendingPhotoPickerMode: StateFlow<String?> = _pendingPhotoPickerMode.asStateFlow()
 
     private val _screenAiAnalysis = MutableStateFlow("")
     val screenAiAnalysis: StateFlow<String> = _screenAiAnalysis.asStateFlow()
@@ -429,6 +645,28 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
     fun consumeRequestedTab() {
         _requestedTab.value = null
+    }
+
+    fun consumePendingPhotoPickerMode() {
+        _pendingPhotoPickerMode.value = null
+    }
+
+    fun respondToLiveToolConfirmation(approved: Boolean) {
+        _pendingLiveConfirmation.value = null
+        liveConfirmationDeferred?.complete(approved)
+        liveConfirmationDeferred = null
+    }
+
+    private suspend fun requestSensitiveConfirmation(title: String, reason: String): Boolean {
+        liveConfirmationDeferred?.cancel()
+        val deferred = CompletableDeferred<Boolean>()
+        liveConfirmationDeferred = deferred
+        _pendingLiveConfirmation.value = title to reason
+        return try {
+            deferred.await()
+        } catch (_: Exception) {
+            false
+        }
     }
 
     fun clearPendingDialNumber() {
@@ -803,12 +1041,19 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                         } else {
                             synchronized(liveTranscriptBuffer) { liveTranscriptBuffer.clear() }
                             pendingTranscriptJob?.cancel()
-                            toolsManager.execute(action)
+                            toolsManager.executeAsync(action)
                         }
                         val targetMood = if (action.name.equals("changeMood", ignoreCase = true)) {
                             val moodName = action.params["mood"]
                             MahiMood.entries.firstOrNull { it.name.equals(moodName, ignoreCase = true) }
                         } else null
+                        if (targetMood != null) {
+                            aiEngine.currentMood = targetMood
+                            val memCtx = userMemoryStore.buildPromptContext(userPrefs.value.memoryConsentGranted)
+                            geminiLiveClient.updateSystemInstruction(
+                                aiEngine.buildSystemPrompt(targetMood, userPrefs.value.language, memCtx)
+                            )
+                        }
                         _uiState.update { cur ->
                             cur.copy(
                                 lastExecutedTool = result,
@@ -1032,14 +1277,17 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 _activeHistoryThreadId.value = conversationHistoryStore.activeThreadId
 
                 if (response.toolAction != null) {
-                    val toolResult = toolsManager.execute(response.toolAction)
+                    val toolResult = toolsManager.executeAsync(response.toolAction)
                     _uiState.value = _uiState.value.copy(lastExecutedTool = toolResult)
                 }
 
                 if (response.toolAction?.name.equals("changeMood", ignoreCase = true)) {
                     val targetMoodStr = response.toolAction?.params?.get("mood")
                     MahiMood.entries.firstOrNull { it.name.equals(targetMoodStr, ignoreCase = true) }?.let {
+                        aiEngine.currentMood = it
                         _uiState.value = _uiState.value.copy(currentMood = it)
+                        val memCtx = userMemoryStore.buildPromptContext(userPrefs.value.memoryConsentGranted)
+                        geminiLiveClient.updateSystemInstruction(aiEngine.buildSystemPrompt(it, userPrefs.value.language, memCtx))
                     }
                 }
 
@@ -1131,7 +1379,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 outcomeText = res.message
                 if (ok && routed.followUpGesture != null) {
                     delay(1100L)
-                    MahiAccessibilityService.executeGestureIntent(routed.followUpGesture)
+                    MahiAccessibilityService.executeGestureIntent(routed.followUpGesture, getApplication())
                 }
             }
             RoutedVoiceCommand.OpenGoogle -> {
@@ -1203,7 +1451,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 cardTitle = "Camera Zoom"
             }
             is RoutedVoiceCommand.ExecuteGesture -> {
-                val gOut = MahiAccessibilityService.executeGestureIntent(routed.gesture)
+                val gOut = MahiAccessibilityService.executeGestureIntent(routed.gesture, getApplication())
                 ok = gOut.success
                 cardTitle = routed.gesture.actionName.replace('_', ' ')
                 outcomeText = gOut.message
@@ -1298,6 +1546,55 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 cardTitle = "Notification Digest"
                 outcomeText = res.getOrElse { it.localizedMessage ?: "Notification access required" }
             }
+            is RoutedVoiceCommand.ExtractOcr -> {
+                val tool = ToolAction(
+                    name = if (routed.fromScreenshot) "readTextFromScreenshot" else "readTextFromCamera",
+                    params = mapOf("explain" to routed.explainWithAi.toString())
+                )
+                val res = toolsManager.executeAsync(tool)
+                ok = res.isSuccess
+                cardTitle = res.displayTitle
+                outcomeText = res.message
+            }
+            RoutedVoiceCommand.OpenGalleryAnalysis -> {
+                val res = visionToolDelegate.openGalleryAnalysis()
+                ok = res.isSuccess
+                cardTitle = res.displayTitle
+                outcomeText = res.message
+            }
+            RoutedVoiceCommand.CompareGalleryImages -> {
+                val res = visionToolDelegate.compareImages()
+                ok = res.isSuccess
+                cardTitle = res.displayTitle
+                outcomeText = res.message
+            }
+            is RoutedVoiceCommand.TapScreenElement -> {
+                val tapOut = MahiAccessibilityService.tapElement(
+                    context = getApplication(),
+                    index = routed.index,
+                    query = routed.query.takeIf { it.isNotBlank() }
+                )
+                ok = tapOut.success
+                cardTitle = "Tap Screen Element"
+                outcomeText = tapOut.message
+            }
+            is RoutedVoiceCommand.TypeOnScreen -> {
+                val res = toolsManager.executeAsync(
+                    ToolAction(
+                        name = "typeText",
+                        params = buildMap {
+                            put("text", routed.text)
+                            if (routed.targetHint.isNotBlank()) put("query", routed.targetHint)
+                            put("submit", routed.submit.toString())
+                            put("append", routed.append.toString())
+                            put("clearFirst", routed.clearFirst.toString())
+                        }
+                    )
+                )
+                ok = res.isSuccess
+                cardTitle = res.displayTitle
+                outcomeText = res.message
+            }
             is RoutedVoiceCommand.SmartControl -> {
                 val segments = routed.chainedSteps.ifEmpty { smartphoneControlManager.splitChainedCommands(routed.rawPhrase) }
                 val outcome = smartphoneControlManager.executeChainedCommands(segments) { stepPhrase ->
@@ -1342,7 +1639,12 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 val r = appLauncherManager.launchApp(sub.appName, openStoreOrWebIfMissing = true)
                 AutomationOutcome(r.success, r.message, r.verificationDetail)
             }
-            is RoutedVoiceCommand.ExecuteGesture -> MahiAccessibilityService.executeGestureIntent(sub.gesture)
+            is RoutedVoiceCommand.ExecuteGesture -> MahiAccessibilityService.executeGestureIntent(sub.gesture, getApplication())
+            is RoutedVoiceCommand.TapScreenElement -> MahiAccessibilityService.tapElement(
+                context = getApplication(),
+                index = sub.index,
+                query = sub.query.takeIf { it.isNotBlank() }
+            )
             RoutedVoiceCommand.OpenGoogle -> {
                 val r = appLauncherManager.openGoogleApp()
                 AutomationOutcome(r.success, r.message, r.verificationDetail)
@@ -1488,6 +1790,8 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         triggerHaptic()
         _uiState.value = _uiState.value.copy(currentMood = mood)
         aiEngine.currentMood = mood
+        val memCtx = userMemoryStore.buildPromptContext(userPrefs.value.memoryConsentGranted)
+        geminiLiveClient.updateSystemInstruction(aiEngine.buildSystemPrompt(mood, userPrefs.value.language, memCtx))
 
         val moodIntro = when (mood) {
             MahiMood.SASSY -> "Sassy mode activated. Prepare yourself!"

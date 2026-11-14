@@ -103,10 +103,24 @@ class SmartphoneControlManager(
                 deviceControlHelper.openSettingsScreen("system")
             }
             lower.contains("mute") && !lower.contains("unmute") -> {
-                volumeManager.muteMedia(true)
+                val targetStream = when {
+                    lower.contains("ring") -> VolumeStreamType.RINGTONE
+                    lower.contains("notif") -> VolumeStreamType.NOTIFICATION
+                    lower.contains("alarm") -> VolumeStreamType.ALARM
+                    lower.contains("call") -> VolumeStreamType.CALL
+                    else -> VolumeStreamType.MEDIA
+                }
+                volumeManager.setStreamMute(targetStream, true)
             }
             lower.contains("unmute") -> {
-                volumeManager.muteMedia(false)
+                val targetStream = when {
+                    lower.contains("ring") -> VolumeStreamType.RINGTONE
+                    lower.contains("notif") -> VolumeStreamType.NOTIFICATION
+                    lower.contains("alarm") -> VolumeStreamType.ALARM
+                    lower.contains("call") -> VolumeStreamType.CALL
+                    else -> VolumeStreamType.MEDIA
+                }
+                volumeManager.setStreamMute(targetStream, false)
             }
             lower.contains("ringtone") && number != null -> {
                 volumeManager.setStreamPercent(VolumeStreamType.RINGTONE, number)

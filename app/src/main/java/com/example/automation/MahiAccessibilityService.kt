@@ -2,6 +2,8 @@ package com.example.automation
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -9,11 +11,15 @@ import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
+import android.os.Bundle
 import android.provider.Settings
 import android.text.TextUtils
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.example.vision.NotificationUnderstandingManager
+import com.example.vision.VisionBitmapUtils
+import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -37,10 +43,34 @@ data class ScreenElementNode(
     val isLongClickable: Boolean,
     val isScrollable: Boolean,
     val isEditable: Boolean,
-    val bounds: Rect
+    val bounds: Rect,
+    val index: Int = 0,
+    val isPassword: Boolean = false,
+    val isFocused: Boolean = false
 ) {
+    val centerX: Int get() = bounds.centerX()
+    val centerY: Int get() = bounds.centerY()
+
     val bestLabel: String
         get() = text.ifBlank { contentDescription }.ifBlank { viewIdResourceName.substringAfterLast("/") }
+
+    fun toIndexedLine(): String {
+        val flags = buildList {
+            if (isClickable) add("clickable")
+            if (isEditable) add("editable")
+            if (isScrollable) add("scrollable")
+            if (isFocused) add("focused")
+        }
+        val widget = className.ifBlank { "View" }
+        val safeLabel = if (isPassword) {
+            "[PASSWORD_HIDDEN]"
+        } else {
+            NotificationUnderstandingManager.redactSensitiveText(bestLabel).first.take(80)
+        }
+        val flagStr = if (flags.isNotEmpty()) " [${flags.joinToString(",")}]" else ""
+        val num = if (index > 0) "$index. " else ""
+        return "$num[$widget] \"$safeLabel\"$flagStr @($centerX,$centerY)"
+    }
 }
 
 data class ScreenSnapshot(
@@ -51,8 +81,8 @@ data class ScreenSnapshot(
     val readableSummary: String
         get() {
             if (elements.isEmpty()) return "No screen elements captured yet. Enable Mahi Accessibility Service to inspect active apps."
-            val labels = elements.mapNotNull { it.bestLabel.takeIf { s -> s.isNotBlank() } }.distinct().take(20)
-            return "App: $packageName | Visible elements (${elements.size}): ${labels.joinToString(", ")}"
+            val lines = elements.take(60).joinToString("\n") { it.toIndexedLine() }
+            return "App: $packageName | Visible elements (${elements.size}):\n$lines"
         }
 }
 
@@ -97,6 +127,9 @@ class MahiAccessibilityService : AccessibilityService() {
 
         private val _gestureHistory = MutableStateFlow<List<GestureActionRecord>>(emptyList())
         val gestureHistory: StateFlow<List<GestureActionRecord>> = _gestureHistory.asStateFlow()
+
+        private val _isReadingScreen = MutableStateFlow(false)
+        val isReadingScreen: StateFlow<Boolean> = _isReadingScreen.asStateFlow()
 
         fun computeSwipeSegment(bounds: Rect, direction: SwipeDirection): GestureSegment {
             val left = bounds.left.toFloat()
@@ -184,6 +217,111 @@ class MahiAccessibilityService : AccessibilityService() {
             return activeService?.captureCurrentScreen(force = force)
         }
 
+        suspend fun readScreenWithRetry(context: Context): Result<ScreenSnapshot> {
+            val svc = activeService
+            if (svc == null) {
+                openAccessibilitySettings(context)
+                recordGesture("READ_SCREEN", "Accessibility Service off — opened Accessibility Settings", false)
+                return Result.failure(
+                    IllegalStateException(
+                        "Mahi Accessibility Service is off. Opened Accessibility Settings—please turn on Mahi AI so I can read the screen."
+                    )
+                )
+            }
+            _isReadingScreen.value = true
+            return try {
+                var snap = svc.captureCurrentScreen(force = true)
+                var attempts = 0
+                while ((snap == null || snap.elements.isEmpty()) && attempts < 2) {
+                    delay(180L)
+                    snap = svc.captureCurrentScreen(force = true)
+                    attempts++
+                }
+                if (snap == null || snap.elements.isEmpty()) {
+                    recordGesture("READ_SCREEN", "No readable UI nodes exposed by ${snap?.packageName ?: "active app"}", false)
+                    Result.failure(
+                        IllegalStateException(
+                            "This screen has no readable Accessibility text nodes (e.g. game/canvas/protected view). Use captureScreenImage to inspect visually."
+                        )
+                    )
+                } else {
+                    recordGesture("READ_SCREEN", "Read ${snap.elements.size} UI elements in ${snap.packageName}", true)
+                    Result.success(snap)
+                }
+            } finally {
+                _isReadingScreen.value = false
+            }
+        }
+
+        fun tapElement(
+            context: Context? = null,
+            index: Int? = null,
+            query: String? = null,
+            viewId: String? = null,
+            x: Float? = null,
+            y: Float? = null
+        ): AutomationOutcome {
+            val svc = activeService
+            if (svc == null) {
+                if (context != null) openAccessibilitySettings(context)
+                recordGesture("TAP", "Accessibility Service off — cannot tap element", false)
+                return AutomationOutcome(
+                    false,
+                    "Mahi Accessibility Service is off. Please enable Mahi AI in Accessibility Settings to tap on screen."
+                )
+            }
+            val ok = svc.performUnifiedTap(index = index, query = query, viewId = viewId, x = x, y = y)
+            val label = when {
+                index != null && index > 0 -> "element #$index"
+                !query.isNullOrBlank() -> "'$query'"
+                !viewId.isNullOrBlank() -> "id:$viewId"
+                x != null && y != null -> "($x,$y)"
+                else -> "target"
+            }
+            recordGesture("TAP", if (ok) "Tapped $label" else "Could not find or tap $label", ok)
+            if (ok) svc.captureCurrentScreen(force = true)
+            return AutomationOutcome(
+                success = ok,
+                message = if (ok) "Tapped $label cleanly." else "Element $label was not found on the current screen.",
+                verificationDetail = if (ok) "Tap dispatched & screen refreshed" else ""
+            )
+        }
+
+        fun typeText(
+            context: Context,
+            index: Int? = null,
+            query: String? = null,
+            text: String,
+            append: Boolean = false,
+            clearFirst: Boolean = false,
+            submit: Boolean = false
+        ): AutomationOutcome {
+            if (text.isBlank() && !clearFirst) {
+                return AutomationOutcome(false, "Cannot type empty text unless clearFirst=true.")
+            }
+            val svc = activeService
+            if (svc == null) {
+                openAccessibilitySettings(context)
+                recordGesture("TYPE_TEXT", "Accessibility Service off — opened Settings", false)
+                return AutomationOutcome(
+                    false,
+                    "Mahi Accessibility Service is off. Opened Accessibility Settings—enable Mahi AI to type on screen."
+                )
+            }
+            val outcome = svc.performTypeText(
+                context = context,
+                index = index,
+                query = query,
+                text = text,
+                append = append,
+                clearFirst = clearFirst,
+                submit = submit
+            )
+            recordGesture("TYPE_TEXT", outcome.message, outcome.success)
+            if (outcome.success) svc.captureCurrentScreen(force = true)
+            return outcome
+        }
+
         fun tapElementByText(query: String): Boolean {
             val svc = activeService
             if (svc == null) {
@@ -251,14 +389,34 @@ class MahiAccessibilityService : AccessibilityService() {
             return ok
         }
 
-        fun swipeScreen(direction: SwipeDirection, speed: GestureSpeed = GestureSpeed.NORMAL): Boolean {
+        fun swipeScreen(
+            direction: SwipeDirection,
+            speed: GestureSpeed = GestureSpeed.NORMAL,
+            targetIndex: Int? = null,
+            targetQuery: String = "",
+            startX: Float? = null,
+            startY: Float? = null,
+            endX: Float? = null,
+            endY: Float? = null
+        ): Boolean {
             val svc = activeService
             if (svc == null) {
                 recordGesture("SWIPE", "Accessibility Service off — cannot swipe ${direction.name}", false)
                 return false
             }
-            val ok = svc.performSwipeGesture(direction, speed, useScrollableBounds = true)
+            val ok = if (startX != null && startY != null && endX != null && endY != null) {
+                svc.performDragCoordinates(startX, startY, endX, endY, speed.durationMs)
+            } else {
+                svc.performSwipeGesture(
+                    direction = direction,
+                    speed = speed,
+                    useScrollableBounds = true,
+                    targetIndex = targetIndex,
+                    targetQuery = targetQuery
+                )
+            }
             recordGesture("SWIPE_${direction.name}", if (ok) "Swiped ${direction.name} (${speed.displayName})" else "Swipe failed", ok)
+            if (ok) svc.captureCurrentScreen(force = true)
             return ok
         }
 
@@ -339,26 +497,70 @@ class MahiAccessibilityService : AccessibilityService() {
             recordGesture("STOP", "All active gestures stopped immediately", true)
         }
 
-        fun executeGestureIntent(intent: VoiceGestureIntent): AutomationOutcome {
+        fun executeGestureIntent(intent: VoiceGestureIntent, context: Context? = null): AutomationOutcome {
+            if (activeService == null && !intent.actionName.equals("STOP", ignoreCase = true)) {
+                if (context != null) openAccessibilitySettings(context)
+                recordGesture(intent.actionName.uppercase(), "Accessibility Service off", false)
+                return AutomationOutcome(
+                    false,
+                    "Mahi Accessibility Service is off. Enable Mahi AI in Accessibility Settings to control the screen."
+                )
+            }
             return when (intent.actionName.uppercase()) {
                 "STOP" -> {
                     stopAllGestures()
                     AutomationOutcome(true, "Stopped all screen gestures immediately", "STOP command executed")
                 }
                 "SWIPE_UP", "SWIPE_UP_SCROLL" -> {
-                    val ok = swipeScreen(SwipeDirection.UP, intent.speed)
+                    val ok = swipeScreen(
+                        SwipeDirection.UP,
+                        intent.speed,
+                        intent.targetIndex,
+                        intent.targetText,
+                        intent.startX,
+                        intent.startY,
+                        intent.endX,
+                        intent.endY
+                    )
                     AutomationOutcome(ok, if (ok) "Swiped UP (${intent.speed.displayName})" else "Enable Mahi Accessibility Service")
                 }
                 "SWIPE_DOWN", "SWIPE_DOWN_SCROLL" -> {
-                    val ok = swipeScreen(SwipeDirection.DOWN, intent.speed)
+                    val ok = swipeScreen(
+                        SwipeDirection.DOWN,
+                        intent.speed,
+                        intent.targetIndex,
+                        intent.targetText,
+                        intent.startX,
+                        intent.startY,
+                        intent.endX,
+                        intent.endY
+                    )
                     AutomationOutcome(ok, if (ok) "Swiped DOWN (${intent.speed.displayName})" else "Enable Mahi Accessibility Service")
                 }
                 "SWIPE_LEFT" -> {
-                    val ok = swipeScreen(SwipeDirection.LEFT, intent.speed)
+                    val ok = swipeScreen(
+                        SwipeDirection.LEFT,
+                        intent.speed,
+                        intent.targetIndex,
+                        intent.targetText,
+                        intent.startX,
+                        intent.startY,
+                        intent.endX,
+                        intent.endY
+                    )
                     AutomationOutcome(ok, if (ok) "Swiped LEFT" else "Enable Mahi Accessibility Service")
                 }
                 "SWIPE_RIGHT" -> {
-                    val ok = swipeScreen(SwipeDirection.RIGHT, intent.speed)
+                    val ok = swipeScreen(
+                        SwipeDirection.RIGHT,
+                        intent.speed,
+                        intent.targetIndex,
+                        intent.targetText,
+                        intent.startX,
+                        intent.startY,
+                        intent.endX,
+                        intent.endY
+                    )
                     AutomationOutcome(ok, if (ok) "Swiped RIGHT" else "Enable Mahi Accessibility Service")
                 }
                 "FAST_SCROLL_DOWN" -> {
@@ -385,10 +587,14 @@ class MahiAccessibilityService : AccessibilityService() {
                     val ok = scrollToEdge(toBottom = false)
                     AutomationOutcome(ok, if (ok) "Scrolling to top of page" else "Enable Mahi Accessibility Service")
                 }
-                "TAP_TEXT" -> {
-                    val query = intent.targetText.ifBlank { "OK" }
-                    val ok = tapElementByText(query)
-                    AutomationOutcome(ok, if (ok) "Tapped '$query'" else "Could not find or tap '$query'")
+                "TAP_TEXT", "TAP_INDEX" -> {
+                    tapElement(
+                        context = context,
+                        index = intent.targetIndex,
+                        query = intent.targetText.ifBlank { null },
+                        x = intent.startX,
+                        y = intent.startY
+                    )
                 }
                 "DOUBLE_TAP" -> {
                     val ok = doubleTapElementOrCenter(intent.targetText)
@@ -475,6 +681,27 @@ class MahiAccessibilityService : AccessibilityService() {
                 onResult(Result.failure(e))
             }
         }
+
+        fun captureScreenJpeg(
+            maxDim: Int = 1024,
+            quality: Int = 72,
+            onResult: (Result<ByteArray>) -> Unit
+        ) {
+            takeScreenshotBitmap { res ->
+                res.onSuccess { bmp ->
+                    try {
+                        val scaled = VisionBitmapUtils.scaleDown(bmp, maxDim)
+                        val out = ByteArrayOutputStream()
+                        scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
+                        onResult(Result.success(out.toByteArray()))
+                    } catch (e: Exception) {
+                        onResult(Result.failure(e))
+                    }
+                }.onFailure { err ->
+                    onResult(Result.failure(err))
+                }
+            }
+        }
     }
 
     @Volatile
@@ -548,16 +775,24 @@ class MahiAccessibilityService : AccessibilityService() {
     private fun traverseNode(
         node: AccessibilityNodeInfo,
         out: MutableList<ScreenElementNode>,
-        depth: Int
+        depth: Int,
+        liveNodesOut: MutableList<AccessibilityNodeInfo>? = null
     ) {
         if (depth > 14 || out.size >= 60) return
+        if (node.isPassword) return
+
         val rect = Rect()
         node.getBoundsInScreen(rect)
-        val text = node.text?.toString()?.trim().orEmpty()
-        val desc = node.contentDescription?.toString()?.trim().orEmpty()
+        val rawText = node.text?.toString()?.trim().orEmpty()
+        val rawDesc = node.contentDescription?.toString()?.trim().orEmpty()
+        val text = NotificationUnderstandingManager.redactSensitiveText(rawText).first
+        val desc = NotificationUnderstandingManager.redactSensitiveText(rawDesc).first
         val resId = node.viewIdResourceName.orEmpty()
 
-        if (text.isNotBlank() || desc.isNotBlank() || node.isClickable || node.isScrollable || node.isEditable) {
+        if (node.isVisibleToUser &&
+            (text.isNotBlank() || desc.isNotBlank() || node.isClickable || node.isScrollable || node.isEditable)
+        ) {
+            val nextIdx = out.size + 1
             out.add(
                 ScreenElementNode(
                     id = "node_${out.size}",
@@ -569,15 +804,178 @@ class MahiAccessibilityService : AccessibilityService() {
                     isLongClickable = node.isLongClickable,
                     isScrollable = node.isScrollable,
                     isEditable = node.isEditable,
-                    bounds = rect
+                    bounds = rect,
+                    index = nextIdx,
+                    isPassword = node.isPassword,
+                    isFocused = node.isFocused
                 )
             )
+            liveNodesOut?.add(node)
         }
 
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            traverseNode(child, out, depth + 1)
+            traverseNode(child, out, depth + 1, liveNodesOut)
         }
+    }
+
+    private fun collectLiveIndexedNodes(): List<AccessibilityNodeInfo> {
+        val dummy = mutableListOf<ScreenElementNode>()
+        val live = mutableListOf<AccessibilityNodeInfo>()
+        getCandidateRoots().forEach { windowRoot ->
+            if (dummy.size < 60) {
+                traverseNode(windowRoot, dummy, 0, live)
+            }
+        }
+        return live
+    }
+
+    private fun findNodeByViewId(viewId: String): AccessibilityNodeInfo? {
+        val target = viewId.trim().lowercase()
+        if (target.isBlank()) return null
+        return collectLiveIndexedNodes().firstOrNull { node ->
+            val id = node.viewIdResourceName?.lowercase().orEmpty()
+            id == target || id.endsWith("/$target") || id.contains(target)
+        }
+    }
+
+    private fun performUnifiedTap(
+        index: Int?,
+        query: String?,
+        viewId: String?,
+        x: Float?,
+        y: Float?
+    ): Boolean {
+        val liveNodes = collectLiveIndexedNodes()
+        val targetNode: AccessibilityNodeInfo? = when {
+            index != null && index in 1..liveNodes.size -> liveNodes[index - 1]
+            !viewId.isNullOrBlank() -> findNodeByViewId(viewId)
+            !query.isNullOrBlank() -> findMatchingNodeAcrossWindows(query)
+            else -> null
+        }
+
+        if (targetNode != null) {
+            var cursor: AccessibilityNodeInfo? = targetNode
+            while (cursor != null) {
+                if (cursor.isClickable && cursor.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    return true
+                }
+                cursor = cursor.parent
+            }
+            val rect = Rect()
+            targetNode.getBoundsInScreen(rect)
+            if (!rect.isEmpty) {
+                return dispatchSingleTap(rect.exactCenterX(), rect.exactCenterY())
+            }
+        }
+
+        if (x != null && y != null) {
+            return dispatchSingleTap(x, y)
+        }
+        return false
+    }
+
+    private fun dispatchSingleTap(cx: Float, cy: Float): Boolean {
+        val path = Path().apply { moveTo(cx, cy) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0L, 60L))
+            .build()
+        return dispatchGestureWithCallback(gesture, "Tap ($cx,$cy)")
+    }
+
+    private fun performTypeText(
+        context: Context,
+        index: Int?,
+        query: String?,
+        text: String,
+        append: Boolean,
+        clearFirst: Boolean,
+        submit: Boolean
+    ): AutomationOutcome {
+        val liveNodes = collectLiveIndexedNodes()
+        val indexedCandidate = if (index != null && index in 1..liveNodes.size) liveNodes[index - 1] else null
+        val queryCandidate = if (!query.isNullOrBlank()) findMatchingNodeAcrossWindows(query) else null
+        val focusedInput = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+
+        val candidate = indexedCandidate ?: queryCandidate ?: focusedInput ?: liveNodes.firstOrNull { it.isEditable }
+        val editable = findEditableTarget(candidate)
+            ?: liveNodes.firstOrNull { it.isEditable }
+            ?: return AutomationOutcome(false, "No editable text box found on the current screen.")
+
+        if (editable.isPassword) {
+            return AutomationOutcome(false, "Refused to read or type into a password field for security.")
+        }
+
+        editable.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        editable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+
+        val finalText = when {
+            clearFirst && text.isEmpty() -> ""
+            append && !clearFirst -> {
+                val existing = editable.text?.toString().orEmpty()
+                if (existing.isBlank()) text else "$existing$text"
+            }
+            else -> text
+        }
+
+        val bundle = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, finalText)
+        }
+        var setOk = editable.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
+
+        if (!setOk) {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            if (cm != null) {
+                cm.setPrimaryClip(ClipData.newPlainText("Mahi Input", finalText))
+                setOk = editable.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+            }
+        }
+
+        if (!setOk) {
+            return AutomationOutcome(false, "Active input box blocked Accessibility text entry.")
+        }
+
+        var submitNote = ""
+        if (submit) {
+            var submitted = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                submitted = editable.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+            }
+            if (!submitted) {
+                val submitLabels = listOf("search", "send", "go", "submit", "next", "done")
+                val submitNode = collectLiveIndexedNodes().firstOrNull { node ->
+                    val label = (node.text?.toString() ?: node.contentDescription?.toString() ?: "").lowercase()
+                    node.isClickable && !node.isEditable && submitLabels.any { label == it || label.contains(it) }
+                }
+                if (submitNode != null) {
+                    submitted = submitNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                }
+            }
+            submitNote = if (submitted) " and submitted" else " (submit button not found)"
+        }
+
+        return AutomationOutcome(
+            success = true,
+            message = "Typed \"$finalText\"$submitNote.",
+            verificationDetail = "Text inserted into editable field$submitNote"
+        )
+    }
+
+    private fun findEditableTarget(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (node == null) return null
+        if (node.isEditable) return node
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            findEditableTarget(child)?.let { return it }
+        }
+        var p = node.parent
+        var hops = 0
+        while (p != null && hops < 4) {
+            if (p.isEditable) return p
+            p = p.parent
+            hops++
+        }
+        return null
     }
 
     private fun findMatchingNodeAcrossWindows(query: String): AccessibilityNodeInfo? {
@@ -751,18 +1149,35 @@ class MahiAccessibilityService : AccessibilityService() {
     private fun performSwipeGesture(
         direction: SwipeDirection,
         speed: GestureSpeed = GestureSpeed.NORMAL,
-        useScrollableBounds: Boolean = true
+        useScrollableBounds: Boolean = true,
+        targetIndex: Int? = null,
+        targetQuery: String = ""
     ): Boolean {
         val dm = resources.displayMetrics
         val fullBounds = Rect(0, 0, dm.widthPixels, dm.heightPixels)
-        val targetBounds = if (useScrollableBounds) {
-            val scrollable = getCandidateRoots().firstNotNullOfOrNull { findLargestScrollableNode(it) }
-            if (scrollable != null) {
+        val liveNodes = collectLiveIndexedNodes()
+        val explicitTarget = when {
+            targetIndex != null && targetIndex in 1..liveNodes.size -> liveNodes[targetIndex - 1]
+            targetQuery.isNotBlank() -> findMatchingNodeAcrossWindows(targetQuery)
+            else -> null
+        }
+
+        val targetBounds = when {
+            explicitTarget != null -> {
                 val r = Rect()
-                scrollable.getBoundsInScreen(r)
-                if (!r.isEmpty && r.width() > 80 && r.height() > 80) r else fullBounds
-            } else fullBounds
-        } else fullBounds
+                explicitTarget.getBoundsInScreen(r)
+                if (!r.isEmpty && r.width() > 60 && r.height() > 60) r else fullBounds
+            }
+            useScrollableBounds -> {
+                val scrollable = getCandidateRoots().firstNotNullOfOrNull { findLargestScrollableNode(it) }
+                if (scrollable != null) {
+                    val r = Rect()
+                    scrollable.getBoundsInScreen(r)
+                    if (!r.isEmpty && r.width() > 80 && r.height() > 80) r else fullBounds
+                } else fullBounds
+            }
+            else -> fullBounds
+        }
 
         val seg = computeSwipeSegment(targetBounds, direction)
         val path = Path().apply {
