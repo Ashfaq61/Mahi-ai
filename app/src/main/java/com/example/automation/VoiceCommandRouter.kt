@@ -55,6 +55,9 @@ sealed class RoutedVoiceCommand {
         val clearFirst: Boolean = false
     ) : RoutedVoiceCommand()
 
+    // Part 7: Screen-Aware Autonomous App Agent
+    data class PerformScreenTask(val goal: String) : RoutedVoiceCommand()
+
     fun deduplicationKey(): String = when (this) {
         StopEverything -> "STOP"
         is LaunchApp -> "LAUNCH:${appName.lowercase()}:${followUpGesture?.actionName.orEmpty()}"
@@ -86,6 +89,7 @@ sealed class RoutedVoiceCommand {
         is SmartControl -> "SMART_CTRL:${rawPhrase.lowercase()}"
         is TapScreenElement -> "TAP_ELEM:${index ?: query.lowercase()}"
         is TypeOnScreen -> "TYPE_TEXT:${text.lowercase()}:$submit"
+        is PerformScreenTask -> "SCREEN_TASK:${goal.lowercase()}"
     }
 }
 
@@ -277,9 +281,10 @@ object VoiceCommandRouter {
             return RoutedVoiceCommand.OpenGoogle
         }
 
-        // 7b. Part 2 Smart Vision, Part 5 Type/Tap & Part 4 Smart Smartphone Control (evaluated before generic app-launcher keywords)
+        // 7b. Part 2 Smart Vision, Part 5 Type/Tap, Part 7 Autonomous Screen Agent & Part 4 Smart Control
         parseSmartVisionCommand(cleanNoWake, lower)?.let { return it }
         parseScreenInteractionCommand(cleanNoWake, lower)?.let { return it }
+        parseAutonomousScreenTaskCommand(cleanNoWake, lower)?.let { return it }
         parseSmartControlPreLaunch(cleanNoWake, lower)?.let { return it }
 
         // 8. App Launch + optional follow-up gesture
@@ -441,6 +446,35 @@ object VoiceCommandRouter {
             }
         }
         return null
+    }
+
+    private fun parseAutonomousScreenTaskCommand(cleanNoWake: String, lower: String): RoutedVoiceCommand? {
+        val isLikeOrFollowOrComment =
+            lower.contains("like karo") || lower.contains("like this") ||
+                lower.contains("unlike") || lower.contains("like hata") ||
+                lower.contains("follow karo") || lower.contains("follow this") ||
+                lower.contains("subscribe karo") || lower.contains("subscribe to") ||
+                lower.contains("comment karo") || lower.contains("post comment") ||
+                lower.contains("comment on")
+
+        val isVideoOrSaveOrBackTask =
+            lower.contains("pehli video") || lower.contains("first video") ||
+                lower.contains("next video") || lower.contains("agla video") ||
+                lower.contains("bas save karo") || lower.contains("share mat") ||
+                (lower.contains("save karo") && (lower.contains("video") || lower.contains("post") || lower.contains("reel"))) ||
+                lower.contains("video chalao") || lower.contains("video play") || lower.contains("play video") ||
+                lower == "wapas jao" || lower == "back jao"
+
+        val isInAppSearchTask = Regex(
+            """(?i)(facebook|fb|instagram|insta|tiktok|whatsapp)\s+(?:par|pe|mein|me|kholo|open|aur|and|on)\s+.+?(?:search|dhoondo|find)"""
+        ).containsMatchIn(cleanNoWake) ||
+            lower.contains("pehla result") || lower.contains("first result")
+
+        return if (isLikeOrFollowOrComment || isVideoOrSaveOrBackTask || isInAppSearchTask) {
+            RoutedVoiceCommand.PerformScreenTask(cleanNoWake)
+        } else {
+            null
+        }
     }
 
     private fun parseSmartControlOrChainedCommand(cleanNoWake: String, lower: String): RoutedVoiceCommand? {

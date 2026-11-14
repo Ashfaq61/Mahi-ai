@@ -35,8 +35,10 @@ class MahiVoiceForegroundService : Service() {
         private const val TAG = "MahiVoiceFGS"
         private const val CHANNEL_ID = "mahi_live_voice_channel"
         private const val WAKE_POPUP_CHANNEL_ID = "mahi_wake_popup_channel"
+        private const val AUTOPILOT_CHANNEL_ID = "mahi_autopilot_channel"
         private const val NOTIFICATION_ID = 4102
         private const val WAKE_FULLSCREEN_NOTIF_ID = 4103
+        private const val NOTIFICATION_ID_AUTOPILOT = 4104
 
         const val ACTION_START_ACTIVE_VOICE = "com.example.audio.ACTION_START_ACTIVE_VOICE"
         const val ACTION_STOP_VOICE = "com.example.audio.ACTION_STOP_VOICE"
@@ -44,6 +46,7 @@ class MahiVoiceForegroundService : Service() {
         const val ACTION_PAUSE_WAKE_FOR_ACTIVE = "com.example.audio.ACTION_PAUSE_WAKE_FOR_ACTIVE"
         const val ACTION_RESUME_WAKE = "com.example.audio.ACTION_RESUME_WAKE"
         const val ACTION_DISABLE_WAKE = "com.example.audio.ACTION_DISABLE_WAKE"
+        const val ACTION_STOP_AUTOPILOT = "com.example.audio.ACTION_STOP_AUTOPILOT"
 
         private val _isForegroundActive = MutableStateFlow(false)
         val isForegroundActive: StateFlow<Boolean> = _isForegroundActive.asStateFlow()
@@ -57,6 +60,61 @@ class MahiVoiceForegroundService : Service() {
         var onStopRequestedFromNotification: (() -> Unit)? = null
         var onWakeDisabledFromNotification: (() -> Unit)? = null
         var onWakeTriggered: ((String) -> Unit)? = null
+        var onStopAutopilotRequested: (() -> Unit)? = null
+
+        fun showAutopilotNotification(context: Context, stepText: String) {
+            try {
+                val nm = context.getSystemService(NotificationManager::class.java) ?: return
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    nm.createNotificationChannel(
+                        NotificationChannel(
+                            AUTOPILOT_CHANNEL_ID,
+                            "Mahi Autopilot Screen Control",
+                            NotificationManager.IMPORTANCE_LOW
+                        ).apply {
+                            description = "Shown only while Mahi Autopilot is actively controlling the screen"
+                            setShowBadge(false)
+                        }
+                    )
+                }
+                val openAppIntent = PendingIntent.getActivity(
+                    context,
+                    4105,
+                    Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                val stopIntent = PendingIntent.getService(
+                    context,
+                    4106,
+                    Intent(context, MahiVoiceForegroundService::class.java).apply { action = ACTION_STOP_AUTOPILOT },
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    Notification.Builder(context, AUTOPILOT_CHANNEL_ID)
+                } else {
+                    @Suppress("DEPRECATION")
+                    Notification.Builder(context)
+                }
+                val notification = builder
+                    .setContentTitle("Mahi Autopilot is controlling the screen")
+                    .setContentText(stepText.ifBlank { "Executing verified screen actions..." })
+                    .setSmallIcon(android.R.drawable.ic_media_play)
+                    .setOngoing(true)
+                    .setContentIntent(openAppIntent)
+                    .addAction(Notification.Action.Builder(null, "Stop", stopIntent).build())
+                    .build()
+                nm.notify(NOTIFICATION_ID_AUTOPILOT, notification)
+            } catch (_: SecurityException) {
+            } catch (_: Exception) {
+            }
+        }
+
+        fun clearAutopilotNotification(context: Context) {
+            try {
+                context.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID_AUTOPILOT)
+            } catch (_: Exception) {
+            }
+        }
 
         fun start(context: Context): Result<Unit> =
             sendAction(context, ACTION_START_ACTIVE_VOICE)
@@ -174,6 +232,15 @@ class MahiVoiceForegroundService : Service() {
             ACTION_START_WAKE_DETECTION -> {
                 activeVoiceMode = false
                 return startWakeMode()
+            }
+
+            ACTION_STOP_AUTOPILOT -> {
+                clearAutopilotNotification(this)
+                onStopAutopilotRequested?.invoke()
+                if (!activeVoiceMode && !MahiPreferencesStore(this).prefsFlow.value.wakeDetectionEnabled) {
+                    stopSelf()
+                }
+                return START_NOT_STICKY
             }
 
             else -> {

@@ -98,6 +98,8 @@ fun AgentAutomationScreen(
     installedApps: List<InstalledAppInfo> = emptyList(),
     gestureStatus: String = "",
     isContinuousScrolling: Boolean = false,
+    isControllingScreen: Boolean = false,
+    screenAgentStatus: String = "",
     gestureHistory: List<GestureActionRecord> = emptyList(),
     onLaunchApp: (String) -> Unit = { deviceControl.launchAppByName(it) },
     onSearchInstalledApps: (String) -> Unit = {},
@@ -228,6 +230,53 @@ fun AgentAutomationScreen(
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold
             )
+        }
+
+        if (isControllingScreen || isAgentRunning) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(NeonMagenta.copy(alpha = 0.16f))
+                    .border(1.dp, NeonMagenta.copy(alpha = 0.7f), RoundedCornerShape(14.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .testTag("mahi_controlling_screen_chip"),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Mahi is controlling the screen",
+                        color = NeonMagenta,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Black
+                    )
+                    if (screenAgentStatus.isNotBlank()) {
+                        Text(
+                            text = screenAgentStatus,
+                            color = colors.onSurface,
+                            fontSize = 11.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(
+                    onClick = {
+                        onStopAgent()
+                        onStopGestures()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626)),
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("controlling_screen_stop_button")
+                ) {
+                    Icon(Icons.Default.Stop, contentDescription = "Stop Screen Control", modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("STOP", fontSize = 11.sp, fontWeight = FontWeight.Black)
+                }
+            }
         }
 
         // System Permissions Checklist

@@ -2,6 +2,7 @@ package com.example.automation
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.KeyguardManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ComponentName
@@ -12,11 +13,13 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.text.TextUtils
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.example.vision.NotificationUnderstandingManager
 import com.example.vision.VisionBitmapUtils
 import java.io.ByteArrayOutputStream
@@ -25,8 +28,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -46,7 +52,9 @@ data class ScreenElementNode(
     val bounds: Rect,
     val index: Int = 0,
     val isPassword: Boolean = false,
-    val isFocused: Boolean = false
+    val isFocused: Boolean = false,
+    val isSelected: Boolean = false,
+    val isChecked: Boolean = false
 ) {
     val centerX: Int get() = bounds.centerX()
     val centerY: Int get() = bounds.centerY()
@@ -60,6 +68,8 @@ data class ScreenElementNode(
             if (isEditable) add("editable")
             if (isScrollable) add("scrollable")
             if (isFocused) add("focused")
+            if (isSelected) add("selected")
+            if (isChecked) add("checked")
         }
         val widget = className.ifBlank { "View" }
         val safeLabel = if (isPassword) {
@@ -130,6 +140,50 @@ class MahiAccessibilityService : AccessibilityService() {
 
         private val _isReadingScreen = MutableStateFlow(false)
         val isReadingScreen: StateFlow<Boolean> = _isReadingScreen.asStateFlow()
+
+        private val _isAutopilotObserving = MutableStateFlow(false)
+        val isAutopilotObserving: StateFlow<Boolean> = _isAutopilotObserving.asStateFlow()
+
+        private val _screenChangeEvents = MutableSharedFlow<ScreenSnapshot>(extraBufferCapacity = 8)
+        val screenChangeEvents: SharedFlow<ScreenSnapshot> = _screenChangeEvents.asSharedFlow()
+
+        fun setAutopilotObserving(active: Boolean) {
+            _isAutopilotObserving.value = active
+            if (!active) {
+                activeService?.debounceWatchJob?.cancel()
+                activeService?.debounceWatchJob = null
+            } else {
+                activeService?.captureCurrentScreen(force = true)
+            }
+        }
+
+        fun isDeviceInteractiveAndUnlocked(context: Context): Boolean {
+            return try {
+                val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                val km = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+                val interactive = pm?.isInteractive ?: true
+                val locked = km?.isKeyguardLocked ?: false
+                interactive && !locked
+            } catch (_: Exception) {
+                true
+            }
+        }
+
+        fun hideSoftKeyboardIfOpen(): Boolean {
+            val svc = activeService ?: return false
+            return try {
+                val hasIme = svc.windows?.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
+                if (hasIme) {
+                    val closed = svc.performGlobalAction(GLOBAL_ACTION_BACK)
+                    if (closed) recordGesture("HIDE_KEYBOARD", "Dismissed keyboard covering target", true)
+                    closed
+                } else {
+                    false
+                }
+            } catch (_: Exception) {
+                false
+            }
+        }
 
         fun computeSwipeSegment(bounds: Rect, direction: SwipeDirection): GestureSegment {
             val left = bounds.left.toFloat()
@@ -611,6 +665,24 @@ class MahiAccessibilityService : AccessibilityService() {
 
         fun pressBack(): Boolean = activeService?.performGlobalAction(GLOBAL_ACTION_BACK) ?: false
 
+        fun navigateBack(context: Context): AutomationOutcome {
+            val svc = activeService
+            if (svc == null) {
+                openAccessibilitySettings(context)
+                recordGesture("BACK", "Accessibility Service off — cannot go back", false)
+                return AutomationOutcome(false, "Enable Mahi Accessibility Service to navigate back.")
+            }
+            val ok = svc.performGlobalAction(GLOBAL_ACTION_BACK)
+            recordGesture("BACK", if (ok) "Navigated Back" else "Back action failed", ok)
+            if (ok) svc.captureCurrentScreen(force = true)
+            return AutomationOutcome(ok, if (ok) "Pressed Back." else "Back action failed.")
+        }
+
+        fun getDisplaySize(context: Context): Pair<Int, Int> {
+            val dm = (activeService ?: context).resources.displayMetrics
+            return dm.widthPixels.coerceAtLeast(1080) to dm.heightPixels.coerceAtLeast(1920)
+        }
+
         fun pressHome(): Boolean = activeService?.performGlobalAction(GLOBAL_ACTION_HOME) ?: false
 
         fun pressRecents(): Boolean = activeService?.performGlobalAction(GLOBAL_ACTION_RECENTS) ?: false
@@ -707,25 +779,47 @@ class MahiAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastCaptureMs: Long = 0L
 
+    private var debounceWatchJob: Job? = null
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         activeService = this
         _isConnected.value = true
         _gestureStatus.value = "Connected — Accessibility Gesture Engine Ready"
-        captureCurrentScreen(force = true)
+        if (_isAutopilotObserving.value) {
+            captureCurrentScreen(force = true)
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        captureCurrentScreen(force = false)
+        // Strict privacy & battery rule: NEVER watch the screen outside an active Autopilot session.
+        if (!_isAutopilotObserving.value) return
+        val type = event?.eventType ?: return
+        if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            type != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+        ) {
+            return
+        }
+        debounceWatchJob?.cancel()
+        debounceWatchJob = fallbackScope.launch {
+            delay(600L)
+            if (_isAutopilotObserving.value) {
+                captureCurrentScreen(force = true)?.let { snap ->
+                    _screenChangeEvents.tryEmit(snap)
+                }
+            }
+        }
     }
 
     override fun onInterrupt() {
+        setAutopilotObserving(false)
         stopAllGestures()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         if (activeService === this) {
+            setAutopilotObserving(false)
             stopAllGestures()
             activeService = null
         }
@@ -807,7 +901,9 @@ class MahiAccessibilityService : AccessibilityService() {
                     bounds = rect,
                     index = nextIdx,
                     isPassword = node.isPassword,
-                    isFocused = node.isFocused
+                    isFocused = node.isFocused,
+                    isSelected = node.isSelected,
+                    isChecked = node.isChecked
                 )
             )
             liveNodesOut?.add(node)

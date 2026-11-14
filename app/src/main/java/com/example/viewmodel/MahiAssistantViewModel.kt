@@ -401,6 +401,27 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
             )
         }
 
+        override suspend fun performScreenTask(goal: String): ToolExecutionResult {
+            val state = apiManagerState.value
+            val provider = state.activeProvider
+            val cfg = state.activeConfig
+            val apiKey = secureKeyStore.getActiveDecryptedKey(provider)
+            val result = autonomousAgentEngine.runScreenTask(
+                goal = goal,
+                language = userPrefs.value.language,
+                provider = provider,
+                apiKey = apiKey,
+                model = cfg.selectedModel,
+                baseUrl = cfg.customBaseUrl
+            )
+            return ToolExecutionResult(
+                actionName = "performScreenTask",
+                displayTitle = if (result.verified) "Screen Task Verified" else "Screen Task",
+                message = result.summary,
+                isSuccess = result.completed
+            )
+        }
+
         override suspend fun confirmSensitiveAction(title: String, reason: String): Boolean {
             return requestSensitiveConfirmation(title, reason)
         }
@@ -450,6 +471,8 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     // Screen Intelligence, Advanced Gestures, Notifications & Autonomous Agent state
     val screenSnapshot: StateFlow<ScreenSnapshot> = MahiAccessibilityService.screenSnapshot
     val isReadingScreen: StateFlow<Boolean> = MahiAccessibilityService.isReadingScreen
+    val isControllingScreen: StateFlow<Boolean> = autonomousAgentEngine.isControllingScreen
+    val screenAgentStatus: StateFlow<String> = autonomousAgentEngine.screenAgentStatus
     val gestureStatus: StateFlow<String> = MahiAccessibilityService.gestureStatus
     val isContinuousScrolling: StateFlow<Boolean> = MahiAccessibilityService.isContinuousScrolling
     val gestureHistory: StateFlow<List<GestureActionRecord>> = MahiAccessibilityService.gestureHistory
@@ -1605,6 +1628,12 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 outcomeText = outcome.message
                 refreshSmartControlTelemetry()
             }
+            is RoutedVoiceCommand.PerformScreenTask -> {
+                val res = visionToolDelegate.performScreenTask(routed.goal)
+                ok = res.isSuccess
+                cardTitle = res.displayTitle
+                outcomeText = res.message
+            }
         }
 
         val effectiveUser = originalUtterance.ifBlank { _uiState.value.liveUserText }
@@ -2477,18 +2506,34 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         val provider = state.activeProvider
         val cfg = state.activeConfig
         val apiKey = secureKeyStore.getActiveDecryptedKey(provider)
+        val lower = goal.lowercase()
+        val isScreenAppGoal = com.example.automation.AppSkills.detectTargetAppInGoal(goal) != null ||
+            listOf("like", "unlike", "follow", "subscribe", "comment", "pehli video", "next video", "save", "wapas")
+                .any { lower.contains(it) } &&
+            listOf("volume", "brightness", "wifi", "bluetooth").none { lower.contains(it) }
 
         viewModelScope.launch {
-            val steps = autonomousAgentEngine.createPlanForGoal(
-                goal = goal,
-                screenSnapshot = screenSnapshot.value,
-                language = userPrefs.value.language,
-                provider = provider,
-                apiKey = apiKey,
-                model = cfg.selectedModel,
-                baseUrl = cfg.customBaseUrl
-            )
-            autonomousAgentEngine.executePlan(goal, steps, viewModelScope)
+            if (isScreenAppGoal) {
+                autonomousAgentEngine.runScreenTask(
+                    goal = goal,
+                    language = userPrefs.value.language,
+                    provider = provider,
+                    apiKey = apiKey,
+                    model = cfg.selectedModel,
+                    baseUrl = cfg.customBaseUrl
+                )
+            } else {
+                val steps = autonomousAgentEngine.createPlanForGoal(
+                    goal = goal,
+                    screenSnapshot = screenSnapshot.value,
+                    language = userPrefs.value.language,
+                    provider = provider,
+                    apiKey = apiKey,
+                    model = cfg.selectedModel,
+                    baseUrl = cfg.customBaseUrl
+                )
+                autonomousAgentEngine.executePlan(goal, steps, viewModelScope)
+            }
         }
     }
 

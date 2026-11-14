@@ -135,6 +135,8 @@ fun MahiScreen(
 
     val screenSnapshot by viewModel.screenSnapshot.collectAsStateWithLifecycle()
     val isReadingScreen by viewModel.isReadingScreen.collectAsStateWithLifecycle()
+    val isControllingScreen by viewModel.isControllingScreen.collectAsStateWithLifecycle()
+    val screenAgentStatus by viewModel.screenAgentStatus.collectAsStateWithLifecycle()
     val pendingPhotoPickerMode by viewModel.pendingPhotoPickerMode.collectAsStateWithLifecycle()
     val pendingLiveConfirmation by viewModel.pendingLiveConfirmation.collectAsStateWithLifecycle()
     val notifications by viewModel.activeNotifications.collectAsStateWithLifecycle()
@@ -602,7 +604,35 @@ fun MahiScreen(
                                 onOpenChrome = { viewModel.launchAppDirect("Chrome") }
                             )
 
-                            if (isReadingScreen) {
+                            if (isControllingScreen) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(NeonMagenta.copy(alpha = 0.16f))
+                                        .border(1.dp, NeonMagenta.copy(alpha = 0.65f), RoundedCornerShape(14.dp))
+                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                        .testTag("home_controlling_screen_chip"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = "Mahi is controlling the screen",
+                                        color = NeonMagenta,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "STOP",
+                                        color = Color(0xFFEF4444),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Black,
+                                        modifier = Modifier
+                                            .clickable { viewModel.stopAgent() }
+                                            .testTag("home_controlling_stop_button")
+                                    )
+                                }
+                            } else if (isReadingScreen) {
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Row(
                                     modifier = Modifier
@@ -1083,6 +1113,8 @@ fun MahiScreen(
                         installedApps = installedApps,
                         gestureStatus = gestureStatus,
                         isContinuousScrolling = isContinuousScrolling,
+                        isControllingScreen = isControllingScreen,
+                        screenAgentStatus = screenAgentStatus,
                         gestureHistory = gestureHistory,
                         onRunGoal = { viewModel.runAgentGoal(it) },
                         onStopAgent = { viewModel.stopAgent() },
@@ -1260,6 +1292,44 @@ fun MahiScreen(
                         }
                     },
                     modifier = Modifier.testTag("live_tool_confirmation_dialog")
+                )
+            }
+
+            if (pendingConfirmation != null && selectedTab != MahiHomeTab.AGENT) {
+                val conf = pendingConfirmation!!
+                AlertDialog(
+                    onDismissRequest = { viewModel.respondToSensitiveConfirmation(false) },
+                    containerColor = colors.surface,
+                    title = {
+                        Text(
+                            text = "Approve Screen Agent Action?",
+                            color = WarningAmber,
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(conf.step.title, color = colors.onSurface, fontWeight = FontWeight.SemiBold)
+                            Text(conf.reason, color = colors.onSurfaceVariant, fontSize = 12.sp)
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = { viewModel.respondToSensitiveConfirmation(true) },
+                            colors = ButtonDefaults.buttonColors(containerColor = NeonMagenta),
+                            modifier = Modifier.testTag("screen_agent_confirm_approve_button")
+                        ) {
+                            Text("Approve", fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    dismissButton = {
+                        OutlinedButton(
+                            onClick = { viewModel.respondToSensitiveConfirmation(false) },
+                            modifier = Modifier.testTag("screen_agent_confirm_deny_button")
+                        ) {
+                            Text("Deny")
+                        }
+                    }
                 )
             }
         }

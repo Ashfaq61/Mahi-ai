@@ -1,0 +1,227 @@
+# MAHI AI — UPDATE PROMPT (Google AI Studio)
+
+You are a senior Android engineer (Kotlin, Jetpack Compose, MVVM, CameraX, ML Kit, foreground services). Work INSIDE my EXISTING project "Mahi AI" (package `com.example`, applicationId `com.aistudio.mahiai.vzrtkp`). This is an UPDATE, not a rewrite. Do not create a new demo app.
+
+## ABSOLUTE RULES
+1. Keep Mahi's current design exactly: Cyber Glow theme (Color.kt, Theme.kt, Type.kt), MahiOrb, waveform, subtitles, status banner, quick chips, light/dark themes. New screens/components must reuse these colors, fonts and components.
+2. Do NOT remove or break existing features: Gemini Live voice, multi-provider API keys, camera tools, Neural Lens, Camera Studio, Agent Automation (Accessibility), calls (dialer, screening, in-call), research + PDF export, notification service, timer/flashlight/mood tools.
+3. Every feature below must be REALLY implemented and ACTIVE (wired to UI, ViewModel, permissions, manifest). No dummy, fake or placeholder functionality. If something cannot work on-device, say so honestly and use the closest real alternative.
+4. Reuse existing classes before creating new ones: `NeuralLensAnalyzer` (ML Kit OCR + image labeling already present), `MahiNotificationService`, `MahiAccessibilityService`, `MahiCameraController`, `GeminiLiveClient`, `MahiVoiceForegroundService`, `SpeechRecognitionManager`, `MahiSpeechSynthesizer`, `AudioRecordManager`, `MahiPreferencesStore`, `MahiTools`, `VoiceCommandRouter`.
+5. No hard-coded API keys. Use the existing `SecureApiKeyStore`.
+6. Offline first (ML Kit, Vosk). Online Gemini only when needed, and keep it optional.
+7. Private data (screen, notifications, gallery, camera, mic) only with explicit user permission and a visible status. Never hidden mic or camera use.
+8. Optimize battery and RAM; must also run on low-end phones. Primary test device: Motorola Moto G Stylus (2025), near-stock Motorola Android (Android 14/15 class), so follow Android 14+ rules strictly (foreground service types, microphone-in-background limits, notification and full-screen-intent permissions, partial photo access). Keep minSdk 24 compatibility.
+9. No duplicate screens, classes or mic sessions. Release camera/audio resources on stop.
+10. Bump `versionCode` (currently 12 in build 1.1.0) to 13 and `versionName` to `1.2.0` so the APK installs as an update over the previous build. Keep applicationId and signing config unchanged.
+11. The code must compile in GitHub Actions (`.github/workflows/android-build.yml`, JDK 21, compileSdk 36). Give complete files, not snippets or "same as above".
+
+## WORKFLOW
+A. Audit the project (manifest, gradle, libs.versions.toml, existing classes) and list files to change.
+B. Implement the parts below in order (Part 6 audit fixes, Part 5 screen control and Part 7 autonomous app agent and Part 8 Autopilot FIRST because they fix live bugs and the main user goal. Parts 1 to 4 are already in the project: only complete what is missing there). Each part must be buildable on its own.
+C. Show full code with exact paths for every new or changed file.
+D. End with a test checklist and a short list of anything that depends on device settings.
+
+---
+
+## PART 6 — AUDIT OF BUILD 1.1.0 (versionCode 12): FIX EVERYTHING THAT IS NOT ACTIVE (DO THIS FIRST)
+
+The current project already contains: Vosk wake-word stack (`WakeWordEngine`, `WakeModelManager`, `WakeEnrollmentStore`, `WakePopupActivity`, `WakeBootReceiver`, Wake Up Detection + 5-sample enrollment in `SettingsModal`), `SmartVisionManagers.kt` (all 10 vision managers) with Neural Lens buttons wired to the ViewModel, `control/` package (`SmartphoneControlManager`, `QuickSettingsManager`, `VolumeManager`, `SystemInfoManagers`) with `SmartControlScreen`, `ConversationHistoryStore`, `UserMemoryStore`, `HistoryMemoryModal`, and Gemini reconnect. Keep all of it. Do NOT rewrite these. Audit found the following are NOT active, so fix them:
+
+**A. Gemini Live voice cannot use the new features (biggest gap).**
+`GeminiLiveClient` declares only these functions: openApp, openCamera, switchCamera, capturePhoto, startVideoRecording, stopVideoRecording, setFlash, setZoom, openGoogle, googleSearch, youtubeSearch, openWebsite, verifyAppLaunch, stopAutomation, screenGesture, searchWeb, setTimer, toggleFlashlight, changeMood, readNotifications, openSettings, getBatteryInfo, getStorageInfo, getNetworkInfo, getDeviceInfo, setVolume, openQuickSettings. So when the user SPEAKS to Mahi, Gemini cannot call any vision or screen function, and the vision features only work from buttons or the text `VoiceCommandRouter`. Add these as real Gemini Live function declarations, handle each in `MahiTools.execute`, and return a useful result to Gemini through `sendToolResponse`:
+- `readScreen`, `tapElement`, `typeText`, `captureScreenImage` (full spec in PART 5 below)
+- `describeScreen` (calls `ScreenVisionManager`), `analyzeScreenshot` (calls `ScreenshotVisionManager`)
+- `readTextFromCamera` / `readTextFromScreenshot` (calls `OCRManager`, English + Hindi, copy support)
+- `identifyObjects` (`ObjectRecognitionManager`), `recognizeScene` (`SceneRecognitionManager`), `describeCameraView` (`CameraVisionManager`)
+- `summarizeNotifications` (`NotificationUnderstandingManager`, masked), `openGalleryAnalysis` and `compareImages` (open the Photo Picker, then run `GalleryAnalysisManager` / `ImageComparisonManager`), `askAboutLastImage` (`VisualQuestionAnswerManager` follow-ups)
+- `getBatteryInfo` etc. already exist: make sure their results are returned to Gemini and spoken naturally.
+Also update the system instruction text so Gemini knows each tool exists and when to call it (especially: call `readScreen` before answering "screen par kya hai").
+
+**B. Non-Live providers (text fallback) do not know the new tools.**
+The `[TOOL:...]` list in `MahiAiEngine` stops at `openSettings`. Add every new tool above plus setVolume, openQuickSettings, getBatteryInfo, getStorageInfo, getNetworkInfo and getDeviceInfo, with examples, so Gemini text, OpenAI-style and other providers can trigger them too.
+
+**C. Screen control (PART 5) is not implemented yet.**
+There is still no `ACTION_SET_TEXT` anywhere, no tap by index/description/id/coordinates, and no `readScreen` / `typeText` Gemini functions. Only `takeScreenshotBitmap()` was added. Implement all of PART 5 now.
+
+**D. Verify and fix these by reading the code, then testing logic paths (report each as PASS/FAIL/FIXED):**
+1. Wake Up Detection: model download progress and retry, 5-sample enrollment saves, service starts with microphone type, `WakePopupActivity` appears when the phone is locked or the app is closed, handoff to Gemini Live, wake pauses while Live is active and resumes after, boot receiver only when enabled, notification Turn Off action works, notification permission requested before the service starts.
+2. `VolumeManager`: mute/unmute, ringtone, notification, alarm, call streams (the older `DeviceControlHelper` only sets STREAM_MUSIC). Make `setVolume` accept the stream and a percentage, and handle Do Not Disturb access when needed.
+3. `QuickSettingsManager`: shade, quick settings, Wi-Fi / mobile data / Bluetooth / NFC / volume panels. Voice and Gemini function both reach it.
+4. Every card in `SmartControlScreen` shows live values and the Permission Status card deep-links to the correct settings page for each permission.
+5. Conversation history and memory: voice conversations (not only typed chat) are saved, memory is injected into the Gemini Live setup, view/edit/delete/forget-all work.
+6. Vision buttons in Neural Lens each show a visible result, error message when permission or API key is missing, and a "speak answer" action.
+7. Any button, toggle or menu entry that has an empty `{}` handler or default no-op lambda: wire it or remove it. No dead controls.
+
+**E. Final report.** End with a table: feature name, status (ACTIVE / FIXED / LIMITED by Android), file where it lives, how to test by voice. Do not mark anything ACTIVE unless a real code path from the user's voice or button to the Android operation exists.
+
+---
+
+## PART 1 — ADVANCED VOICE SYSTEM (Wake Up Detection)
+
+Goal: hands-free "Hey Mahi". Reuse the existing Gemini Live brain; do not rebuild it.
+
+1. **Menu setting "Wake Up Detection"** (toggle) in the existing settings UI. Off by default. Turning it on requests RECORD_AUDIO and POST_NOTIFICATIONS, then starts the service.
+2. **Wake phrase enrollment**: user records "Hey Mahi" 5 times. Save the 5 samples and calibrated threshold (energy/duration) in app-private storage. Show progress 1/5…5/5 with retry.
+3. **Detection with Vosk (offline)**: add `com.alphacephei:vosk-android` (latest stable) and JNA as needed. The project currently contains NO Vosk model, so:
+   - Bundle a small model (e.g. `vosk-model-small-en-us`) in `assets/` and unpack to `filesDir` on first run, OR download once with clear progress UI and a retry. Explain which you chose and the APK-size impact.
+   - Use a grammar-restricted recognizer (`["hey mahi", "hey mahee", "hey maahi", "[unk]"]`) so it listens only for the wake phrase.
+   - Use the 5 enrollment recordings to tune sensitivity and to learn accepted recognition variants of the phrase. Be honest: this is phrase detection with personal tuning, not true speaker verification.
+4. **Background listening**: extend the existing `MahiVoiceForegroundService` (type `microphone`) with a persistent notification showing "Wake Up Detection ON" and a one-tap Turn Off action. Handle Android 14+ foreground-service rules, service restart after kill, boot completion (only if user enabled it), and show guidance to set Mahi's battery usage to Unrestricted in Android settings (Motorola has no heavy auto-start manager, but battery optimization can still stop the service).
+5. **Wake popup**: on detection show a small clean Google/Gemini-style overlay/activity with the Mahi orb and name (no big text box), then hand off to the existing Gemini Live flow. Use a transparent activity or notification full-screen intent; avoid SYSTEM_ALERT_WINDOW unless truly needed, and if used, request it properly.
+6. **Voice activity detection**: detect speech start/stop using `AudioRecordManager` RMS and manage capture cleanly.
+7. **Barge-in**: if Mahi is speaking and the user starts talking, stop TTS / Live audio output immediately and listen.
+8. **Single mic owner**: wake detection must release the mic before Gemini Live or speech recognition starts, and resume after. Never two `AudioRecord` sessions at once.
+9. **Voice settings**: enable/disable wake, language/voice option, microphone test, audio focus handling.
+10. **Error handling**: permission revoked, model load failure, audio focus loss, service killed, with clear user messages.
+
+---
+
+## PART 2 — SMART INTELLIGENCE & VISION (all 10 active)
+
+Create independent managers in `com.example.vision` (and related packages). Each must be wired to a UI entry (inside the existing Neural Lens / Camera Studio / a new "Smart Vision" tab using the same design) AND to voice commands via `VoiceCommandRouter` and `MahiTools` (Roman Urdu / Hinglish / English / Urdu / Hindi phrases, e.g. "screen par kya hai", "ye kya hai", "screenshot samjhao", "notification batao").
+
+1. **ScreenVisionManager — Live screen understanding.** Use `MahiAccessibilityService` node tree for visible text, buttons and UI elements (only after the user enables the service). Answer questions about the current screen via Gemini with the extracted screen context, with an offline summary fallback.
+2. **Screenshot Visual Analysis.** Capture via `AccessibilityService.takeScreenshot()` (API 30+), and on older devices let the user pick or share a screenshot image. Analyse with ML Kit + Gemini: objects, text, errors, UI problems, full explanation.
+3. **CameraVisionManager — Live camera vision.** Extend `NeuralLensAnalyzer` / CameraX analysis; runs only while the user has the camera screen open; user questions answered with the current frame as visual context.
+4. **ObjectRecognitionManager.** ML Kit image labeling (already included) for offline object names with confidence; multiple objects listed separately; Gemini for extra information about a chosen object.
+5. **SceneRecognitionManager.** Indoor/outdoor and environment/activity description (ML Kit labels offline → Gemini for the full explanation when online).
+6. **OCRManager.** ML Kit text recognition for English plus Devanagari (Hindi) models; Urdu via Gemini when online (state this limit honestly). Copy button, "Explain this text" button, works on camera, screenshot and gallery images.
+7. **NotificationUnderstandingManager.** Use `MahiNotificationService` (explicit notification-access permission only): summarize, flag important ones (calls, banking/OTP-type, messages from contacts), answer questions about them. Mask sensitive content (OTPs, card numbers) in logs and on screen; never persist notification text without consent.
+8. **GalleryAnalysisManager.** Use the Android Photo Picker / `ActivityResultContracts.PickVisualMedia` so only user-selected images are accessed (no broad storage permission). Description, objects, text, scene, Q&A.
+9. **VisualQuestionAnswerManager.** Keep the multi-turn conversation context per image/screenshot/camera frame; follow-up questions work without re-sending context text. Reset on user request.
+10. **ImageComparisonManager.** User selects two images; compute common and different elements (ML Kit label/text diff offline; Gemini for the explanation of differences). Show results with a clear side-by-side UI.
+
+For each feature, mark clearly in code comments and in the final report: works fully offline / needs API (Gemini) / needs a specific Android version.
+
+---
+
+## PART 3 — BRAIN, MEMORY & HISTORY (extend, don't duplicate)
+
+Mahi already has the Gemini Live brain and personality. Add only what is missing:
+1. Conversation history: store and display past conversations (use `MahiPreferencesStore` or add Room only if it compiles cleanly with the current KSP setup; otherwise use a JSON file in `filesDir`).
+2. Structured long-term memory with user consent: name, language, preferences. Add view, edit, delete and "forget everything" controls.
+3. Graceful handling of API errors, network loss, session timeout and auto-reconnect, with clear UI states: loading, listening, connected, speaking, error.
+
+---
+
+## PART 4 — SMART SMARTPHONE CONTROL SYSTEM
+
+Mahi ALREADY has these (reuse, do not rewrite, only expose them in the new menu and voice router where missing): app launch by name (`AppLauncherManager`), tap/click by text, scroll, swipe, scroll to top/bottom, back/home (`MahiAccessibilityService`), media volume and brightness incl. WRITE_SETTINGS (`DeviceControlHelper`), flashlight (`MahiTools`), sensitive-action confirmation (`AutonomousAgentEngine`).
+
+Mahi does NOT have these yet, so build them for real:
+1. **QuickSettingsManager**: open notification shade and Quick Settings panel via `AccessibilityService.performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS / GLOBAL_ACTION_QUICK_SETTINGS)`. Open system panels (Wi-Fi, Bluetooth, mobile data, airplane, NFC) through official `Settings.ACTION_*` / `Settings.Panel` intents. Explain honestly that Android 10+ blocks direct toggling of Wi-Fi, mobile data and Bluetooth by normal apps, so Mahi opens the panel, and can tap the tile via accessibility only with user approval.
+2. **VolumeManager** (extend `DeviceControlHelper`): increase, decrease, set percentage, mute and unmute for media, ringtone, notification, alarm and call streams via `AudioManager`; handle Do Not Disturb policy access when needed.
+3. **BatteryInformationManager**: percentage, charging status and type, temperature, health, voltage (from `ACTION_BATTERY_CHANGED` / `BatteryManager`); spoken answer in the user's language.
+4. **StorageInformationManager**: internal total/free/used via `StatFs`; app-visible usage only, no broad storage permission.
+5. **NetworkInformationManager**: Wi-Fi state and SSID where permitted, mobile network state, network type, internet reachability via `ConnectivityManager` / `NetworkCapabilities` (ACCESS_NETWORK_STATE already present; request location permission only if SSID is needed, and explain why).
+6. **DeviceInformationManager**: manufacturer, model, Android version, SDK level, available RAM (`ActivityManager.MemoryInfo`), uptime (`SystemClock.elapsedRealtime`).
+7. **SmartphoneControlManager**: one central dispatcher that routes parsed commands to all managers above plus the existing ones. Extend `VoiceCommandRouter` and `MahiTools` with new commands (English / Roman Urdu / Hinglish / Urdu / Hindi), for example: "battery kitni hai", "storage kitna bacha hai", "wifi connected hai?", "volume mute karo", "ringtone volume 50 karo", "quick settings kholo", "phone ka model batao", "settings kholo aur neeche scroll karo" (multi-step chained commands).
+8. **Safety**: never perform payments, transfers, uninstalls, deletions or security-sensitive taps without explicit user confirmation (reuse the existing confirmation flow). Accessibility must be enabled manually by the user; no secret screen monitoring.
+9. **UI**: add a new menu option **"Smart Smartphone Control"** in the existing Mahi design with cards: App Control, Screen Automation, Quick Settings, Flashlight, Volume, Brightness, Battery, Storage, Network, Device Info, Permission Status. Each card shows ON/OFF or live values, and the Permission Status card lists every needed permission (Accessibility, Notification access, WRITE_SETTINGS, DND access, Mic, Camera, Phone) with a one-tap button to the right system settings page. Do not duplicate the existing Agent Automation screen: link to it for Screen Automation.
+
+Every command must execute a real Android operation. If Android restricts it, say so and use the closest officially supported alternative.
+
+---
+
+## PART 5 — FIX: MAHI MUST SEE THE SCREEN, CLICK, TYPE AND SWIPE (HIGH PRIORITY)
+
+Audit result of the current code (verify, then fix):
+- `MahiAccessibilityService.captureCurrentScreen()` already reads the screen into `ScreenSnapshot`, but Gemini Live NEVER receives it. `GeminiLiveClient` declares no function that reads the screen, so Mahi cannot "see" it.
+- There is NO text typing anywhere (no `ACTION_SET_TEXT`), so Mahi cannot type.
+- Tapping works only by matching text (`performActionOnMatchingNode`). There is no tap by element number, content description, view id or coordinates.
+- `ScreenSnapshot.readableSummary` returns only 20 labels, too little to act on.
+- `sendToolResponse(callId, name, resultMessage, success)` already exists, so tool results CAN be returned to Gemini. Use it.
+
+Implement for real (add to `GeminiLiveClient` function declarations, `MahiTools`, `MahiAiEngine` tool list, `VoiceCommandRouter`):
+1. **`readScreen`** tool: returns the current app package plus a numbered list of visible elements (index, label, type, clickable/editable/scrollable, bounds center). Cap about 60 elements, prioritise visible and actionable ones, skip password fields. The result goes back via `sendToolResponse` so Mahi can describe the screen and decide the next action. Refresh the snapshot each call (`rootInActiveWindow` can be null, retry briefly and handle it).
+2. **`tapElement`** tool: tap by index (from the last `readScreen`), or by text / content description / view id, or by x,y. Prefer `ACTION_CLICK` on the node or a clickable parent, then fall back to `dispatchGesture` at the node center. After tapping, re-read the screen and report the result.
+3. **`typeText`** tool: focus the target editable field (by index or the currently focused field) and set text with `ACTION_SET_TEXT`, with a clipboard `ACTION_PASTE` fallback. Support append vs replace, clear field, and pressing the keyboard action (search/send/enter) via `ACTION_IME_ENTER` (API 30+) or by tapping the on-screen button. Never type into password fields, and ask confirmation before sending messages, payments or other sensitive actions (reuse the existing confirmation flow).
+4. **`swipe` / `scroll`**: keep the existing `screenGesture` tool, but also accept swipe by coordinates and by direction on a chosen element, and report success or failure back to Gemini.
+5. **Visual fallback**: add `captureScreenImage` using `AccessibilityService.takeScreenshot()` (API 30+, needs `canTakeScreenshot="true"` in `mahi_accessibility_config.xml`). Send a downscaled JPEG to Gemini Live as `realtimeInput` image only when the user asks "screen dekho" and only when the accessibility node tree is empty or useless (games, Flutter, WebView, canvas apps). Nothing is captured in the background.
+6. **Agent loop**: for requests like "YouTube kholo aur Mahi AI search karo", let Mahi chain steps: open app, `readScreen`, `tapElement`, `typeText`, press search, `readScreen` to verify. Stop after a step limit or when the same screen repeats, say what happened, and keep the existing `stopAutomation` working at all times.
+7. **Service health**: if the accessibility service is off, the tool must say so clearly by voice and open the accessibility settings page. Keep the service alive across app restarts, and show an "Accessibility ON/OFF" status in the new Smart Smartphone Control menu. Add `flagRequestFilterKeyEvents`/other flags only if needed, and keep `flagRetrieveInteractiveWindows` plus `flagIncludeNotImportantViews`.
+8. **Privacy**: never log or send screen content that looks like passwords, OTPs or card numbers; mask them. The user sees a visible indicator whenever Mahi reads the screen.
+9. **Update the system prompt** in `MahiAiEngine` and the Gemini Live setup so the model KNOWS it can see and control the screen with these tools, and must call `readScreen` before answering any "screen par kya hai" question instead of guessing.
+
+Acceptance test: say "screen par kya hai" in Chrome and Mahi names the real page and buttons. Say "search box mein cricket score likho aur search karo" and the text is really typed and submitted. Say "neeche scroll karo" and "left swipe karo" and the screen moves.
+
+---
+
+## PART 7 — SCREEN-AWARE AUTONOMOUS APP AGENT (Facebook, YouTube, Instagram, TikTok, WhatsApp, Chrome)
+
+Goal: the user speaks a goal in plain Roman Urdu / Hinglish / Urdu / Hindi / English and Mahi looks at the screen, understands it and does it by herself, step by step. Examples that MUST work:
+- "Facebook par video play karo" / "pehli video chalao"
+- "Is video ko like karo" / "like hata do"
+- "Is channel ko follow karo" / "subscribe karo"
+- "Is video par comment karo: bahut khoob"
+- "Facebook par Ali Khan search karo" / "YouTube par ye naam search karo"
+- "Next video par jao", "share mat karna, bas save karo", "wapas jao"
+
+Build on PART 5 tools (`readScreen`, `tapElement`, `typeText`, `screenGesture`, `captureScreenImage`) and the existing `AutonomousAgentEngine`. Do not create a second automation engine.
+
+1. **Observe → think → act → verify loop** (`ScreenAgentLoop`, inside `AutonomousAgentEngine`):
+   - Observe: call `readScreen` (accessibility node tree: text, contentDescription, viewIdResourceName, class, clickable, bounds, selected/checked state).
+   - Think: send the user's goal, the short history of actions done, and the compact screen description to Gemini and ask for exactly ONE next action as JSON: `{action: tap|type|scroll|swipe|back|openApp|wait|done|ask_user, targetIndex, text, reason}`. Keep the prompt small and the response schema strict; reject anything outside the schema.
+   - Act: execute through the PART 5 tools.
+   - Verify: re-read the screen and check that the expected change happened (for example the Like button now says "Unlike"/"Liked" or is selected; the Follow button changed to "Following"; the typed text appears in the field; the comment appears in the list). Retry with another strategy at most 2 times, then tell the user honestly what failed.
+   - Hard limits: max 15 steps per command, stop if the same screen repeats 3 times, `stopAutomation` always interrupts immediately, speak a short progress update only at key moments.
+2. **Locate elements robustly**, in this order: match by contentDescription/text in the user's language and English (Like/Unlike/Reactions, Comment, Share, Follow/Following, Subscribe/Subscribed, Search, Send/Post, Play, Save, Next); then by viewId; then by position relative to a known element (for example the Like button sits next to the Comment button); then a visual fallback: `captureScreenImage` and ask Gemini for the target point as normalized coordinates, then tap by coordinates with `dispatchGesture`. Facebook and TikTok often hide labels or use custom views, so the visual fallback is mandatory, not optional.
+3. **App skill recipes** (`AppSkills.kt`, one small class per app, each only a hint list of label variants, typical tab positions and verification rules, never hard-coded pixel positions):
+   - Facebook (`com.facebook.katana`, `com.facebook.lite`): home feed, Watch/Video tab, search icon, Like/Comment/Share row, Follow on page or profile header, comment box and Post button.
+   - YouTube (`com.google.android.youtube`): search, play first result, Like, Subscribe, Comments sheet, Add a comment, Next/Autoplay.
+   - Instagram, TikTok, WhatsApp, Chrome: basic recipes for search, open item, like, follow, comment, send.
+   Add a generic recipe so unknown apps still work through the loop.
+4. **Search a name**: open the app, tap the search icon or box, `typeText` the name (replace existing text), press the keyboard search action, `readScreen`, and if the user said "pehla result" open it. Read out the top results if the user only asked to search.
+5. **Safety and policy rules (mandatory):**
+   - Explicit commands like play, like, follow, subscribe, search, open: run directly without extra confirmation.
+   - Comment or message: if the user dictated the exact words, type and post them. If Mahi writes the text herself, read it back and ask "post kar doon?" first.
+   - Always ask before: payments or purchases, deleting posts or accounts, changing passwords or security settings, unfollowing or blocking many accounts, sending money, installing or uninstalling apps, sharing to other people.
+   - Never type into password, OTP or card fields and never read them aloud.
+   - One user command = one task. No mass liking, mass following or repeated commenting loops, and wait about 1 to 2 seconds between actions, so the feature cannot be used for spam or platform abuse.
+   - If a login wall, CAPTCHA or two-step verification appears, stop and tell the user so they can handle it manually.
+6. **Gemini Live integration**: expose one function `performScreenTask(goal: String)` to Gemini Live that starts `ScreenAgentLoop`, and return the final result (what was done, whether verified, or why it stopped) through `sendToolResponse`. Update the system instruction so Gemini calls `performScreenTask` for any request that needs actions inside an app, and uses `readScreen` for pure "screen par kya hai" questions. Add the same tool to the `[TOOL:...]` text fallback list in `MahiAiEngine` and a `VoiceCommandRouter` entry for these phrases.
+7. **UI**: in `AgentAutomationScreen` show the live step log (what Mahi sees, what she is doing, verified or failed), a big Stop button, and an overlay chip "Mahi is controlling the screen" while the loop runs. Keep the existing Mahi design.
+8. **Honest limits to state in the final report**: apps change their UI with updates, so the visual fallback and verification step are what keep it working; Facebook/Instagram/TikTok may block or hide parts of the node tree; screenshots need Android 11+ (below that, only the node tree is available); DRM or secure screens cannot be read; accuracy is best on Moto G Stylus 2025-class phones with the accessibility service enabled and Mahi's battery set to Unrestricted.
+
+Acceptance tests: say "Facebook kholo aur pehli video chalao", "is video ko like karo", "is page ko follow karo", "comment karo: zabardast", "Facebook par Ahmed Raza search karo". For each, Mahi reads the screen, acts, verifies, and speaks the result.
+
+---
+
+## PART 8 — AUTOPILOT: MAHI KEEPS WATCHING THE SCREEN, FINDS BUTTONS ON HER OWN AND KEEPS WORKING
+
+Goal: the user gives a goal ONCE and Mahi finishes it without being told again and again. She keeps watching the screen, scrolls to find the button she needs, taps it, handles small interruptions, and continues until the goal is done or the user says stop. This extends PART 7 (`ScreenAgentLoop`); do not build a second loop.
+
+**Reference projects (study the design, adapt the ideas to Mahi's Kotlin code, do not paste code blindly; keep license notices if any code is reused):**
+- OpenDroid, `github.com/yashab-cyber/opendroid` (Kotlin, Apache-2.0): accessibility-driven agent with a plan manager, a re-evaluation step after failures, a vision engine that sends screenshots to the LLM and falls back to text scraping.
+- PokeClaw (on-device Android agent): the LLM receives the screen as a UI tree, picks a tool (tap, swipe, type, open app), executes it through the accessibility service, observes the result and loops until done.
+- PhoneClaw, `github.com/8dazo/phoneclaw`, Google's open-source Artemis agent and Minitap `mobile-use`: same pattern (accessibility helper + LLM + action loop).
+- Hugging Face GUI-grounding models: UI-TARS-1.5-7B (`bytedance-research`), `LZXzju/Qwen2.5-VL-3B-UI-R1-E`, OmniParser V2, OS-Atlas, ShowUI, UGround. They take a screenshot plus a target description (for example "Follow button") and return the click point.
+
+**Decision for Mahi (important):** these Hugging Face models are 2B to 7B parameters, too heavy to run inside the app on a phone, and they need a GPU server. So do NOT bundle them. Use Gemini vision (already in Mahi) for point grounding: send a downscaled screenshot and the target description, ask for `{point:[y,x]}` normalized 0..1000 (or a bounding box), convert to pixels with the real screen size, and tap with `dispatchGesture`. Add an OPTIONAL pluggable `GuiGroundingProvider` interface with implementations `GeminiGroundingProvider` (default) and `RemoteHttpGroundingProvider` (user can paste the URL and token of their own hosted UI-TARS / UI-R1 endpoint in API settings, disabled by default, nothing is uploaded unless the user configures it).
+
+Implement (real code, wired, no stubs):
+1. **Goal sessions** (`GoalSession` in `AutonomousAgentEngine`): one spoken goal can contain several steps ("Facebook kholo, pehli video chalao, like karo, channel follow karo aur comment karo: zabardast"). Mahi converts it into a short plan (list of sub-goals with a verification rule each), runs it, and re-plans when a step fails (re-evaluation step like OpenDroid). Raise the limit to 40 actions per session with a checkpoint every 10 actions where she says a short status; the user can always say "ruk jao" / "stop" to cancel at once.
+2. **Continuous watching without polling**: observe via `AccessibilityEvent` (`TYPE_WINDOW_STATE_CHANGED`, `TYPE_WINDOW_CONTENT_CHANGED`) with a 500 to 800 ms debounce, and read the node tree only when something changed, so battery use stays low. Take a screenshot only when the node tree is empty or the target was not found. Respect the screenshot rate limit of `takeScreenshot`. Stop observing when the session ends.
+3. **Find the button by herself** (`TargetFinder`): if the wanted button (Like, Follow, Comment, Post, Search, Play, Next, Allow-not-now, etc.) is not visible: (a) check hidden or collapsed content such as "See more", "More options" and overflow menus; (b) scroll down up to 6 times, checking the screen after each scroll; (c) scroll back up and try up to 3 times; (d) try the visual fallback with Gemini grounding; (e) if still not found, say exactly what she sees and ask the user one short question. Detect "end of list" (screen unchanged after scroll) and stop scrolling.
+4. **Handle interruptions automatically**: harmless popups like "Not now", "Skip", "Maybe later", cookie or rating banners, "Close" buttons and update-later dialogs are dismissed automatically. NEVER auto-accept permission requests, purchases, subscriptions to paid plans, "Allow access to contacts/location/mic", login or CAPTCHA screens: pause and ask the user. Same sensitive-action rules as PART 7.
+5. **Resilience**: handle app crash or app switch (re-open the app and resume at the last verified step), screen off or lock (pause and tell the user), accessibility service disconnected (stop and tell the user), keyboard covering the target (hide it or scroll), and slow loading (wait up to 5 seconds for new content before retrying).
+6. **Autopilot mode UI**: a persistent foreground notification "Mahi Autopilot is controlling the screen" with a Stop button, an on-screen floating chip showing the current step, live log in `AgentAutomationScreen`, and a Settings switch "Allow Autopilot" (off by default, with a plain-language explanation of what it does). Mahi never watches the screen outside an active session.
+7. **Anti-abuse and privacy**: no endless engagement loops (no automatic liking, following or commenting on many items; the session ends when the stated goal is done), 1 to 2 second delay between actions, never read or send password / OTP / card fields, screenshots are processed and discarded, never saved, and sent only to the AI provider the user configured.
+8. **Memory of what works**: store per-app label variants that worked (for example the exact contentDescription of Facebook's Like button on this phone) in a small local JSON so the next run finds it faster. Clear it from Settings.
+9. **Report back**: when finished, Mahi says what she did and whether each step was verified, and logs it in the history.
+
+Acceptance tests on the Moto G Stylus 2025: (a) "Facebook par video chalao aur like karo" with the Like button below the fold: she scrolls, finds it and taps it, then verifies. (b) "is page ko follow karo" when the Follow button is behind a "More" menu. (c) A "Not now" popup appears during the task: she dismisses it and continues. (d) Say "ruk jao": she stops at once. (e) Turn the Autopilot switch off: voice screen tasks are refused with a clear message.
+
+---
+
+## MANIFEST / GRADLE CHECKLIST
+- Add only the permissions actually needed (e.g. `FOREGROUND_SERVICE_MICROPHONE` already exists; add `RECEIVE_BOOT_COMPLETED`, full-screen-intent or overlay only if used).
+- Declare any new activity/service/receiver properly; extend `mahi_accessibility_config.xml` only as needed for screenshot/screen reading (`canTakeScreenshot`, `canRetrieveWindowContent`, `canTakeScreenshot`).
+- Add new dependencies in `libs.versions.toml` and `app/build.gradle.kts` (Vosk, ML Kit Devanagari text recognition) and keep ProGuard rules working for Vosk/JNA.
+- Keep `.github/workflows/android-build.yml` working; output APK must be produced on push to `main`.
+
+## FINAL OUTPUT REQUIRED
+1. List of changed/new files with full code.
+2. Honest limitations list (Vosk phrase detection ≠ speaker verification, screenshot API 30+, Urdu OCR needs internet, background mic depends on OEM battery settings).
+3. Test checklist: 5-phrase enrollment, wake with screen on/off, popup, handoff to Gemini Live, barge-in, disable switch, permission denial; each of the 10 vision features; notification privacy; update-install over the old APK.
+4. Do not claim anything is complete unless it is implemented in the project.

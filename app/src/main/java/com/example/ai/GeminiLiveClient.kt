@@ -563,6 +563,17 @@ class GeminiLiveClient(
                     put("required", JSONArray().apply { put("question") })
                 })
             })
+            put(JSONObject().apply {
+                put("name", "performScreenTask")
+                put("description", "Run Mahi's autonomous screen agent loop (Observe -> Think -> Act -> Verify) to complete multi-step goals inside apps like Facebook, YouTube, Instagram, TikTok, WhatsApp, or Chrome (e.g., play first video, like/unlike, follow/subscribe, comment, search a name, save without sharing).")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("goal", JSONObject().apply { put("type", "STRING") })
+                    })
+                    put("required", JSONArray().apply { put("goal") })
+                })
+            })
         }
 
         fun classifyCloseOrFailureError(code: Int?, reasonOrMessage: String): GeminiLiveError {

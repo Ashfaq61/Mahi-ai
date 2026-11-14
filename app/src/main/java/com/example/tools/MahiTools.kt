@@ -50,6 +50,7 @@ interface MahiVisionToolDelegate {
     suspend fun openGalleryAnalysis(): ToolExecutionResult
     suspend fun compareImages(): ToolExecutionResult
     suspend fun askAboutLastImage(question: String): ToolExecutionResult
+    suspend fun performScreenTask(goal: String): ToolExecutionResult
     suspend fun confirmSensitiveAction(title: String, reason: String): Boolean
 }
 
@@ -210,6 +211,9 @@ class MahiToolsManager(
 
                 "askaboutlastimage" -> visionDelegate?.askAboutLastImage(action.params["question"].orEmpty())
                     ?: ToolExecutionResult("askAboutLastImage", "Visual Q&A", "Vision delegate unavailable.", isSuccess = false)
+
+                "performscreentask" -> visionDelegate?.performScreenTask(action.params["goal"].orEmpty())
+                    ?: ToolExecutionResult("performScreenTask", "Screen Agent", "Screen Agent delegate unavailable.", isSuccess = false)
 
                 else -> execute(action)
             }

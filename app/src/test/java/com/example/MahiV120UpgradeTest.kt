@@ -12,12 +12,16 @@ import com.example.ai.GeminiLiveClient
 import com.example.ai.MahiAiEngine
 import com.example.ai.MahiMood
 import com.example.automation.AgentActionType
+import com.example.automation.AppSkills
+import com.example.automation.AutomationOutcome
 import com.example.automation.AutonomousAgentEngine
 import com.example.automation.DeviceControlHelper
 import com.example.automation.RoutedVoiceCommand
+import com.example.automation.ScreenAgentActionType
 import com.example.automation.ScreenElementNode
 import com.example.automation.ScreenSnapshot
 import com.example.automation.SensitiveCategory
+import com.example.automation.SwipeDirection
 import com.example.automation.VoiceCommandRouter
 import com.example.control.AllVolumeLevels
 import com.example.control.BatteryInfoSnapshot
@@ -31,6 +35,7 @@ import com.example.tools.MahiToolsManager
 import com.example.tools.MahiVisionToolDelegate
 import com.example.tools.ToolAction
 import com.example.tools.ToolExecutionResult
+import com.example.ui.screens.AgentAutomationScreen
 import com.example.ui.screens.NeuralLensScreen
 import com.example.ui.screens.SmartControlScreen
 import com.example.ui.theme.MahiAiTheme
@@ -39,6 +44,8 @@ import com.example.vision.NeuralLensAnalyzer
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -110,6 +117,7 @@ class MahiV120UpgradeTest {
     fun `ai system prompt includes readScreen-first rule, 6-step loop guidance, and safety constraints`() {
         val prompt = MahiAiEngine().buildSystemPrompt(MahiMood.SASSY, AppLanguage.ENGLISH)
         assertTrue(prompt.contains("readScreen"))
+        assertTrue(prompt.contains("performScreenTask"))
         assertTrue(prompt.contains("tapElement"))
         assertTrue(prompt.contains("typeText"))
         assertTrue(prompt.contains("captureScreenImage"))
@@ -253,6 +261,7 @@ class MahiV120UpgradeTest {
                 return ToolExecutionResult("compareImages", "Compare", "Opened")
             }
             override suspend fun askAboutLastImage(question: String) = ToolExecutionResult("askAboutLastImage", "VQA", "OK")
+            override suspend fun performScreenTask(goal: String) = ToolExecutionResult("performScreenTask", "Screen Agent", "Done: $goal", isSuccess = true)
             override suspend fun confirmSensitiveAction(title: String, reason: String) = false
         }
 
@@ -276,6 +285,9 @@ class MahiV120UpgradeTest {
         assertTrue(compareCalled)
         assertTrue(tools.executeAsync(ToolAction("captureScreenImage", emptyMap())).isSuccess)
         assertTrue(captureCalled)
+        val taskRes = tools.executeAsync(ToolAction("performScreenTask", mapOf("goal" to "is video ko like karo")))
+        assertTrue(taskRes.isSuccess)
+        assertTrue(taskRes.message.contains("like"))
     }
 
     @Test
@@ -337,5 +349,179 @@ class MahiV120UpgradeTest {
         }
         composeTestRule.onNodeWithTag("lens_submode_1").performScrollTo().performClick()
         composeTestRule.onNodeWithTag("lens_read_screen_button").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun `app skills recipes, schema validation, and part 7 voice router phrases work cleanly`() {
+        assertEquals("facebook", AppSkills.forPackage("com.facebook.katana").id)
+        assertEquals("youtube", AppSkills.forPackage("com.google.android.youtube").id)
+        assertEquals("instagram", AppSkills.forPackage("com.instagram.android").id)
+        assertEquals("tiktok", AppSkills.forPackage("com.zhiliaoapp.musically").id)
+        assertEquals("whatsapp", AppSkills.forPackage("com.whatsapp").id)
+        assertEquals("chrome", AppSkills.forPackage("com.android.chrome").id)
+
+        val valid = AppSkills.parseScreenAgentDecision("""{"action":"tap","targetIndex":2,"targetQuery":"Like","reason":"Like video"}""")
+        assertNotNull(valid)
+        assertEquals(ScreenAgentActionType.TAP, valid!!.action)
+        assertEquals(2, valid.targetIndex)
+
+        assertNull(AppSkills.parseScreenAgentDecision("""{"action":"rm_rf","targetIndex":1}"""))
+        assertEquals("bahut khoob", AppSkills.extractExplicitCommentText("is video par comment karo: bahut khoob"))
+        assertNotNull(AppSkills.detectBulkSpamViolation("sab posts ko like karo"))
+
+        assertTrue(VoiceCommandRouter.parseCommand("Facebook kholo aur pehli video chalao") is RoutedVoiceCommand.PerformScreenTask)
+        assertTrue(VoiceCommandRouter.parseCommand("is video ko like karo") is RoutedVoiceCommand.PerformScreenTask)
+        assertTrue(VoiceCommandRouter.parseCommand("is channel ko subscribe karo") is RoutedVoiceCommand.PerformScreenTask)
+        assertTrue(VoiceCommandRouter.parseCommand("comment karo: zabardast") is RoutedVoiceCommand.PerformScreenTask)
+        assertTrue(VoiceCommandRouter.parseCommand("Facebook par Ahmed Raza search karo") is RoutedVoiceCommand.PerformScreenTask)
+        assertTrue(VoiceCommandRouter.parseCommand("share mat karna, bas save karo") is RoutedVoiceCommand.PerformScreenTask)
+        assertTrue(VoiceCommandRouter.parseCommand("wapas jao") is RoutedVoiceCommand.PerformScreenTask)
+    }
+
+    @Test
+    fun `screen agent loop executes observe-think-act-verify for like, comment, search, save-no-share, and halts on security or repeats`() = runBlocking {
+        val engine = AutonomousAgentEngine(appContext, DeviceControlHelper(appContext))
+
+        // 1. Like verification flow: initial "Like" -> after tap switches to "Unlike" selected
+        var likedState = false
+        val likeDriver = object : AutonomousAgentEngine.ScreenAgentDriver {
+            override fun isAccessibilityEnabled() = true
+            override suspend fun readScreen(): Result<ScreenSnapshot> {
+                val likeNode = ScreenElementNode(
+                    id = "like_btn",
+                    text = if (likedState) "Unlike" else "Like",
+                    contentDescription = if (likedState) "Liked" else "Like",
+                    className = "Button",
+                    viewIdResourceName = "com.facebook.katana:id/like",
+                    isClickable = true,
+                    isLongClickable = false,
+                    isScrollable = false,
+                    isEditable = false,
+                    bounds = Rect(20, 900, 180, 980),
+                    index = 1,
+                    isSelected = likedState
+                )
+                return Result.success(ScreenSnapshot("com.facebook.katana", listOf(likeNode), System.currentTimeMillis()))
+            }
+            override suspend fun openApp(appName: String) = AutomationOutcome(true, "Opened $appName")
+            override suspend fun tap(index: Int?, query: String?, viewId: String?, x: Float?, y: Float?): AutomationOutcome {
+                likedState = true
+                return AutomationOutcome(true, "Tapped Like")
+            }
+            override suspend fun typeText(index: Int?, query: String?, text: String, submit: Boolean, clearFirst: Boolean) = AutomationOutcome(true, "Typed")
+            override suspend fun scroll(forward: Boolean) = AutomationOutcome(true, "Scrolled")
+            override suspend fun swipe(direction: SwipeDirection) = AutomationOutcome(true, "Swiped")
+            override suspend fun pressBack() = AutomationOutcome(true, "Back")
+            override suspend fun captureScreenJpeg(): Result<ByteArray> = Result.failure(IllegalStateException("no screenshot"))
+            override fun displaySize() = 1080 to 2400
+        }
+        val likeResult = engine.runScreenTask("is video ko like karo", driver = likeDriver, stepDelayMs = 0L, verifyDelayMs = 0L)
+        assertTrue(likeResult.completed)
+        assertTrue(likeResult.verified)
+        assertEquals(1, likeResult.stepsExecuted)
+
+        // 2. Save without sharing ("share mat karna, bas save karo"): must tap Save, never Share
+        var shareTapped = false
+        var saveTapped = false
+        val saveDriver = object : AutonomousAgentEngine.ScreenAgentDriver {
+            override fun isAccessibilityEnabled() = true
+            override suspend fun readScreen(): Result<ScreenSnapshot> {
+                val shareNode = ScreenElementNode("share", "Share", "", "Button", "", true, false, false, false, Rect(10, 900, 100, 980), index = 1)
+                val saveNode = ScreenElementNode("save", if (saveTapped) "Saved" else "Save", "", "Button", "", true, false, false, false, Rect(120, 900, 220, 980), index = 2, isSelected = saveTapped)
+                return Result.success(ScreenSnapshot("com.facebook.katana", listOf(shareNode, saveNode), System.currentTimeMillis()))
+            }
+            override suspend fun openApp(appName: String) = AutomationOutcome(true, "Opened")
+            override suspend fun tap(index: Int?, query: String?, viewId: String?, x: Float?, y: Float?): AutomationOutcome {
+                if (query?.contains("share", ignoreCase = true) == true || index == 1) shareTapped = true
+                if (query?.contains("save", ignoreCase = true) == true || index == 2) saveTapped = true
+                return AutomationOutcome(true, "Tapped")
+            }
+            override suspend fun typeText(index: Int?, query: String?, text: String, submit: Boolean, clearFirst: Boolean) = AutomationOutcome(true, "")
+            override suspend fun scroll(forward: Boolean) = AutomationOutcome(true, "")
+            override suspend fun swipe(direction: SwipeDirection) = AutomationOutcome(true, "")
+            override suspend fun pressBack() = AutomationOutcome(true, "")
+            override suspend fun captureScreenJpeg(): Result<ByteArray> = Result.failure(IllegalStateException("none"))
+            override fun displaySize() = 1080 to 2400
+        }
+        val saveResult = engine.runScreenTask("share mat karna, bas save karo", driver = saveDriver, stepDelayMs = 0L, verifyDelayMs = 0L)
+        assertTrue(saveResult.completed)
+        assertTrue(saveTapped)
+        assertFalse(shareTapped)
+
+        // 3. Dictated comment ("comment karo: zabardast") -> opens comment box & submits exact text
+        var commentBoxOpen = false
+        var submittedComment = ""
+        val commentDriver = object : AutonomousAgentEngine.ScreenAgentDriver {
+            override fun isAccessibilityEnabled() = true
+            override suspend fun readScreen(): Result<ScreenSnapshot> {
+                val nodes = if (!commentBoxOpen) {
+                    listOf(ScreenElementNode("c_btn", "Comment", "Comment", "Button", "", true, false, false, false, Rect(20, 900, 180, 980), index = 1))
+                } else {
+                    listOf(ScreenElementNode("c_box", submittedComment.ifBlank { "Write a comment" }, "", "EditText", "", true, false, false, true, Rect(20, 900, 800, 980), index = 1))
+                }
+                return Result.success(ScreenSnapshot("com.facebook.katana", nodes, System.currentTimeMillis()))
+            }
+            override suspend fun openApp(appName: String) = AutomationOutcome(true, "Opened")
+            override suspend fun tap(index: Int?, query: String?, viewId: String?, x: Float?, y: Float?): AutomationOutcome {
+                commentBoxOpen = true
+                return AutomationOutcome(true, "Opened comment sheet")
+            }
+            override suspend fun typeText(index: Int?, query: String?, text: String, submit: Boolean, clearFirst: Boolean): AutomationOutcome {
+                submittedComment = text
+                return AutomationOutcome(true, "Posted '$text'", "Submitted comment")
+            }
+            override suspend fun scroll(forward: Boolean) = AutomationOutcome(true, "")
+            override suspend fun swipe(direction: SwipeDirection) = AutomationOutcome(true, "")
+            override suspend fun pressBack() = AutomationOutcome(true, "")
+            override suspend fun captureScreenJpeg(): Result<ByteArray> = Result.failure(IllegalStateException("none"))
+            override fun displaySize() = 1080 to 2400
+        }
+        val commentRes = engine.runScreenTask("comment karo: zabardast", driver = commentDriver, stepDelayMs = 0L, verifyDelayMs = 0L)
+        assertTrue(commentRes.completed)
+        assertEquals("zabardast", submittedComment)
+
+        // 4. Security CAPTCHA wall stops immediately
+        val captchaDriver = object : AutonomousAgentEngine.ScreenAgentDriver by likeDriver {
+            override suspend fun readScreen(): Result<ScreenSnapshot> {
+                val captchaNode = ScreenElementNode("cap", "Verify you're human CAPTCHA", "", "TextView", "", false, false, false, false, Rect(0, 0, 500, 100), index = 1)
+                return Result.success(ScreenSnapshot("com.facebook.katana", listOf(captchaNode), System.currentTimeMillis()))
+            }
+        }
+        val captchaRes = engine.runScreenTask("is video ko like karo", driver = captchaDriver, stepDelayMs = 0L, verifyDelayMs = 0L)
+        assertFalse(captchaRes.completed)
+        assertTrue(captchaRes.summary.contains("CAPTCHA", ignoreCase = true))
+
+        // 5. Spam / bulk action blocked immediately
+        val spamRes = engine.runScreenTask("all posts like karo", driver = likeDriver, stepDelayMs = 0L, verifyDelayMs = 0L)
+        assertFalse(spamRes.completed)
+        assertTrue(spamRes.summary.contains("one focused task", ignoreCase = true))
+    }
+
+    @Test
+    fun `agent automation screen shows controlling chip when screen agent is active`() {
+        composeTestRule.setContent {
+            MahiAiTheme {
+                AgentAutomationScreen(
+                    deviceControl = DeviceControlHelper(appContext),
+                    screenSnapshot = ScreenSnapshot(),
+                    notifications = emptyList(),
+                    planSteps = emptyList(),
+                    isAgentRunning = true,
+                    isControllingScreen = true,
+                    screenAgentStatus = "Observing Facebook reel...",
+                    pendingConfirmation = null,
+                    history = emptyList(),
+                    screenAiAnalysis = "",
+                    onRunGoal = {},
+                    onStopAgent = {},
+                    onRespondConfirmation = {},
+                    onAnalyzeCurrentScreenWithAi = {},
+                    onSendAuthorizedWhatsAppReply = { _, _, _ -> },
+                    onClearHistory = {}
+                )
+            }
+        }
+        composeTestRule.onNodeWithTag("mahi_controlling_screen_chip").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("controlling_screen_stop_button").assertIsDisplayed()
     }
 }

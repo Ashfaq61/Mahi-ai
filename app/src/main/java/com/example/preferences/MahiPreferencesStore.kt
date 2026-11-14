@@ -58,7 +58,8 @@ data class MahiUserPrefs(
     val autoLanguageDetection: Boolean = true,
     val pushToTalkMode: Boolean = false,
     val wakeDetectionEnabled: Boolean = false,
-    val memoryConsentGranted: Boolean = false
+    val memoryConsentGranted: Boolean = false,
+    val autopilotEnabled: Boolean = false
 )
 
 class MahiPreferencesStore(context: Context) {
@@ -70,6 +71,7 @@ class MahiPreferencesStore(context: Context) {
         private const val KEY_PUSH_TO_TALK = "push_to_talk_mode"
         private const val KEY_WAKE_DETECTION = "wake_detection_enabled"
         private const val KEY_MEMORY_CONSENT = "memory_consent_granted"
+        private const val KEY_AUTOPILOT_ENABLED = "autopilot_enabled"
     }
 
     private val prefs: SharedPreferences =
@@ -85,13 +87,15 @@ class MahiPreferencesStore(context: Context) {
         val ptt = prefs.getBoolean(KEY_PUSH_TO_TALK, false)
         val wakeEnabled = prefs.getBoolean(KEY_WAKE_DETECTION, false)
         val memoryConsent = prefs.getBoolean(KEY_MEMORY_CONSENT, false)
+        val autopilotEnabled = prefs.getBoolean(KEY_AUTOPILOT_ENABLED, false)
         return MahiUserPrefs(
             language = lang,
             themeMode = theme,
             autoLanguageDetection = autoLang,
             pushToTalkMode = ptt,
             wakeDetectionEnabled = wakeEnabled,
-            memoryConsentGranted = memoryConsent
+            memoryConsentGranted = memoryConsent,
+            autopilotEnabled = autopilotEnabled
         )
     }
 
@@ -123,5 +127,10 @@ class MahiPreferencesStore(context: Context) {
     fun setMemoryConsentGranted(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_MEMORY_CONSENT, enabled).commit()
         _prefsFlow.value = _prefsFlow.value.copy(memoryConsentGranted = enabled)
+    }
+
+    fun setAutopilotEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTOPILOT_ENABLED, enabled).commit()
+        _prefsFlow.value = _prefsFlow.value.copy(autopilotEnabled = enabled)
     }
 }

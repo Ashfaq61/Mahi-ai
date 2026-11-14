@@ -25,7 +25,18 @@ class SecureApiKeyStore(
         private const val KEY_ACTIVE_PROVIDER = "active_provider"
         private const val KEY_CONFIGS_JSON = "provider_configs_json"
         private const val KEY_ENTRIES_JSON = "encrypted_key_entries_json"
+        private const val KEY_REMOTE_GROUNDING_ENABLED = "remote_grounding_enabled"
+        private const val KEY_REMOTE_GROUNDING_URL = "remote_grounding_url"
+        private const val KEY_REMOTE_GROUNDING_TOKEN_CIPHER = "remote_grounding_token_cipher"
+        private const val KEY_REMOTE_GROUNDING_TOKEN_MASKED = "remote_grounding_token_masked"
     }
+
+    data class RemoteGroundingConfig(
+        val enabled: Boolean = false,
+        val endpointUrl: String = "",
+        val maskedToken: String = "",
+        val hasToken: Boolean = false
+    )
 
     private val prefs: SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -35,10 +46,14 @@ class SecureApiKeyStore(
     private val _state = MutableStateFlow(loadInitialState())
     val state: StateFlow<ApiManagerState> = _state.asStateFlow()
 
+    private val _remoteGrounding = MutableStateFlow(loadRemoteGrounding())
+    val remoteGrounding: StateFlow<RemoteGroundingConfig> = _remoteGrounding.asStateFlow()
+
     @Synchronized
     fun reloadFromDisk(): ApiManagerState {
         val loaded = loadInitialState()
         _state.value = loaded
+        _remoteGrounding.value = loadRemoteGrounding()
         return loaded
     }
 
@@ -368,5 +383,56 @@ class SecureApiKeyStore(
     fun getActiveDecryptedKey(provider: AiProvider = _state.value.activeProvider): String? {
         val activeEntry = _state.value.getSelectedKey(provider) ?: return null
         return getDecryptedKey(activeEntry.id)
+    }
+
+    private fun loadRemoteGrounding(): RemoteGroundingConfig {
+        val enabled = prefs.getBoolean(KEY_REMOTE_GROUNDING_ENABLED, false)
+        val url = prefs.getString(KEY_REMOTE_GROUNDING_URL, "").orEmpty()
+        val masked = prefs.getString(KEY_REMOTE_GROUNDING_TOKEN_MASKED, "").orEmpty()
+        val hasCipher = !prefs.getString(KEY_REMOTE_GROUNDING_TOKEN_CIPHER, null).isNullOrBlank()
+        return RemoteGroundingConfig(
+            enabled = enabled && url.isNotBlank(),
+            endpointUrl = url,
+            maskedToken = masked,
+            hasToken = hasCipher
+        )
+    }
+
+    @Synchronized
+    fun saveRemoteGrounding(enabled: Boolean, endpointUrl: String, rawToken: String?) {
+        val cleanUrl = endpointUrl.trim().trimEnd('/')
+        val effectiveEnabled = enabled && cleanUrl.isNotBlank()
+        val editor = prefs.edit()
+            .putBoolean(KEY_REMOTE_GROUNDING_ENABLED, effectiveEnabled)
+            .putString(KEY_REMOTE_GROUNDING_URL, cleanUrl)
+
+        val trimmedToken = rawToken?.trim()
+        if (!trimmedToken.isNullOrBlank()) {
+            editor.putString(KEY_REMOTE_GROUNDING_TOKEN_CIPHER, cipher.encrypt(trimmedToken))
+            editor.putString(KEY_REMOTE_GROUNDING_TOKEN_MASKED, maskApiKey(trimmedToken))
+        }
+        editor.commit()
+        _remoteGrounding.value = loadRemoteGrounding()
+    }
+
+    fun getDecryptedRemoteGroundingToken(): String? {
+        val encrypted = prefs.getString(KEY_REMOTE_GROUNDING_TOKEN_CIPHER, null) ?: return null
+        return try {
+            cipher.decrypt(encrypted)
+        } catch (_: Exception) {
+            Log.e(TAG, "Failed to decrypt remote grounding token")
+            null
+        }
+    }
+
+    @Synchronized
+    fun clearRemoteGrounding() {
+        prefs.edit()
+            .remove(KEY_REMOTE_GROUNDING_ENABLED)
+            .remove(KEY_REMOTE_GROUNDING_URL)
+            .remove(KEY_REMOTE_GROUNDING_TOKEN_CIPHER)
+            .remove(KEY_REMOTE_GROUNDING_TOKEN_MASKED)
+            .commit()
+        _remoteGrounding.value = RemoteGroundingConfig()
     }
 }
