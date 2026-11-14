@@ -41,7 +41,7 @@ class MahiAiEngine(
 
     private val model by lazy {
         Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash"
+            modelName = "gemini-2.5-flash"
         )
     }
 
@@ -83,6 +83,8 @@ Available centralized tools:
 - [TOOL:setTimer|minutes=5|label=Workout]
 - [TOOL:toggleFlashlight|state=on]
 - [TOOL:changeMood|mood=FLIRTY]
+- [TOOL:readNotifications|filter=whatsapp]
+- [TOOL:openSettings|category=wifi]
 
 Example 1:
 User: "Open TikTok"
@@ -221,19 +223,19 @@ Mahi: "A little bit. Don't let it get to your head though, I've got plenty of ot
         if (lower.contains("spotify")) {
             return MahiResponse(
                 replyText = "Opening Spotify! You've got good taste, I'll give you that.",
-                toolAction = ToolAction("openWebsite", mapOf("url" to "https://open.spotify.com", "title" to "Spotify"))
+                toolAction = ToolAction("openApp", mapOf("appName" to "Spotify"))
             )
         }
         if (lower.contains("youtube")) {
             return MahiResponse(
                 replyText = "YouTube, coming right up. Don't get stuck in a three-hour rabbit hole again!",
-                toolAction = ToolAction("openWebsite", mapOf("url" to "https://youtube.com", "title" to "YouTube"))
+                toolAction = ToolAction("openApp", mapOf("appName" to "YouTube"))
             )
         }
         if (lower.contains("instagram") || lower.contains("insta")) {
             return MahiResponse(
                 replyText = "Launching Instagram. Go ahead and stalk your crush, I won't snitch.",
-                toolAction = ToolAction("openWebsite", mapOf("url" to "https://instagram.com", "title" to "Instagram"))
+                toolAction = ToolAction("openApp", mapOf("appName" to "Instagram"))
             )
         }
         if (lower.contains("flashlight") || lower.contains("torch")) {

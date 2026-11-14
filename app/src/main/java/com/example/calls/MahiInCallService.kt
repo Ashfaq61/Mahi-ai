@@ -172,7 +172,10 @@ class MahiInCallService : InCallService() {
     override fun onCreate() {
         super.onCreate()
         CallAutomationRepository.init(applicationContext)
-        ttsHelper = MahiSpeechSynthesizer(applicationContext).apply { initialize() }
+        ttsHelper = MahiSpeechSynthesizer(
+            context = applicationContext,
+            useVoiceCommunicationAudio = true
+        ).apply { initialize() }
     }
 
     override fun onDestroy() {

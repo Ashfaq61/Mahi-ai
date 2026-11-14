@@ -85,6 +85,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -299,10 +300,12 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
             launch {
                 speechRecognitionManager.partialText.collectLatest { text ->
                     if (text.isNotBlank() && !_uiState.value.isGeminiLiveActive) {
-                        _uiState.value = _uiState.value.copy(
-                            liveUserText = text,
-                            visualState = AssistantVisualState.LISTENING
-                        )
+                        _uiState.update {
+                            it.copy(
+                                liveUserText = text,
+                                visualState = AssistantVisualState.LISTENING
+                            )
+                        }
                     }
                 }
             }
@@ -319,43 +322,51 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                     val errorMsg = if (cap == MicCaptureState.PERMISSION_DENIED || cap == MicCaptureState.HARDWARE_ERROR) {
                         audioRecordManager.lastCaptureError.value
                     } else null
-                    _uiState.value = _uiState.value.copy(
-                        isMicActivelyCapturing = activelyCapturing,
-                        errorMessage = errorMsg ?: _uiState.value.errorMessage
-                    )
+                    _uiState.update { cur ->
+                        cur.copy(
+                            isMicActivelyCapturing = activelyCapturing,
+                            errorMessage = errorMsg ?: cur.errorMessage
+                        )
+                    }
                 }
             }
             launch {
                 audioRecordManager.amplitudeFlow.collectLatest { amp ->
-                    _uiState.value = _uiState.value.copy(micLevel = amp)
+                    _uiState.update { it.copy(micLevel = amp) }
                 }
             }
             launch {
                 audioRecordManager.waveformBarsFlow.collectLatest { micBars ->
-                    if (_uiState.value.visualState == AssistantVisualState.LISTENING ||
-                        _uiState.value.visualState == AssistantVisualState.RECONNECTING
-                    ) {
-                        _uiState.value = _uiState.value.copy(waveformBars = micBars)
+                    _uiState.update { cur ->
+                        if (cur.visualState == AssistantVisualState.LISTENING ||
+                            cur.visualState == AssistantVisualState.RECONNECTING
+                        ) {
+                            cur.copy(waveformBars = micBars)
+                        } else cur
                     }
                 }
             }
             launch {
                 speechSynthesizer.speakingWaveform.collectLatest { ttsBars ->
-                    if (_uiState.value.visualState == AssistantVisualState.SPEAKING && !_uiState.value.isGeminiLiveActive) {
-                        _uiState.value = _uiState.value.copy(waveformBars = ttsBars)
+                    _uiState.update { cur ->
+                        if (cur.visualState == AssistantVisualState.SPEAKING && !cur.isGeminiLiveActive) {
+                            cur.copy(waveformBars = ttsBars)
+                        } else cur
                     }
                 }
             }
             launch {
                 geminiLiveClient.speakingWaveform.collectLatest { liveBars ->
-                    if (_uiState.value.visualState == AssistantVisualState.SPEAKING && _uiState.value.isGeminiLiveActive) {
-                        _uiState.value = _uiState.value.copy(waveformBars = liveBars)
+                    _uiState.update { cur ->
+                        if (cur.visualState == AssistantVisualState.SPEAKING && cur.isGeminiLiveActive) {
+                            cur.copy(waveformBars = liveBars)
+                        } else cur
                     }
                 }
             }
             launch {
                 MahiVoiceForegroundService.foregroundRestrictionNotice.collectLatest { notice ->
-                    _uiState.value = _uiState.value.copy(backgroundMicNotice = notice)
+                    _uiState.update { it.copy(backgroundMicNotice = notice) }
                 }
             }
         }
@@ -395,31 +406,52 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
     fun startSession() {
         triggerHaptic()
+        val hasAudioPerm = ContextCompat.checkSelfPermission(
+            getApplication(),
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasAudioPerm) {
+            _uiState.update {
+                it.copy(
+                    visualState = AssistantVisualState.ERROR,
+                    isGeminiLiveActive = false,
+                    isMicActivelyCapturing = false,
+                    errorCategory = ApiErrorCategory.CONNECTION_FAILED,
+                    errorMessage = "Microphone permission is required before starting voice mode."
+                )
+            }
+            return
+        }
+
         val activeProvider = apiManagerState.value.activeProvider
         val activeModel = apiManagerState.value.activeConfig.selectedModel
         val apiKey = secureKeyStore.getActiveDecryptedKey(activeProvider)
 
         if (apiKey.isNullOrBlank()) {
-            _uiState.value = _uiState.value.copy(
-                visualState = AssistantVisualState.ERROR,
-                isGeminiLiveActive = false,
-                isMicActivelyCapturing = false,
-                errorCategory = ApiErrorCategory.MISSING_KEY,
-                errorMessage = "${activeProvider.displayName} API key missing. Open API Keys & Providers to add a key."
-            )
+            _uiState.update {
+                it.copy(
+                    visualState = AssistantVisualState.ERROR,
+                    isGeminiLiveActive = false,
+                    isMicActivelyCapturing = false,
+                    errorCategory = ApiErrorCategory.MISSING_KEY,
+                    errorMessage = "${activeProvider.displayName} API key missing. Open API Keys & Providers to add a key."
+                )
+            }
             return
         }
 
-        // Start foreground microphone service cleanly so voice stays alive across TikTok/Facebook/YouTube
+        // Start foreground microphone service cleanly after RECORD_AUDIO verification (Android 14+ requirement)
         MahiVoiceForegroundService.start(getApplication())
 
-        _uiState.value = _uiState.value.copy(
-            visualState = AssistantVisualState.CONNECTING,
-            liveUserText = "",
-            errorMessage = null,
-            errorCategory = null,
-            reconnectMessage = null
-        )
+        _uiState.update {
+            it.copy(
+                visualState = AssistantVisualState.CONNECTING,
+                liveUserText = "",
+                errorMessage = null,
+                errorCategory = null,
+                reconnectMessage = null
+            )
+        }
 
         if (shouldUseGeminiLiveAudio()) {
             startGeminiLiveSession(apiKey, activeModel)
@@ -457,18 +489,20 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
             systemPrompt = systemPrompt,
             callbacks = object : GeminiLiveCallbacks {
                 override fun onSetupComplete() {
-                    _uiState.value = _uiState.value.copy(
-                        visualState = AssistantVisualState.LISTENING,
-                        isGeminiLiveActive = true,
-                        isMicActivelyCapturing = audioRecordManager.isActivelyCapturing(),
-                        reconnectMessage = null,
-                        errorMessage = null,
-                        liveAssistantText = "Gemini Live audio active ($model). Continuous listening ON!"
-                    )
+                    _uiState.update {
+                        it.copy(
+                            visualState = AssistantVisualState.LISTENING,
+                            isGeminiLiveActive = true,
+                            isMicActivelyCapturing = audioRecordManager.isActivelyCapturing(),
+                            reconnectMessage = null,
+                            errorMessage = null,
+                            liveAssistantText = "Gemini Live audio active ($model). Continuous listening ON!"
+                        )
+                    }
                     val queued = pendingLivePromptAfterConnect
                     if (!queued.isNullOrBlank()) {
                         pendingLivePromptAfterConnect = null
-                        _uiState.value = _uiState.value.copy(liveUserText = queued)
+                        _uiState.update { it.copy(liveUserText = queued) }
                         geminiLiveClient.sendTextPromptOverAudioSession(queued)
                     }
                 }
@@ -504,7 +538,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                         updated
                     }
 
-                    _uiState.value = _uiState.value.copy(liveUserText = accumulated)
+                    _uiState.update { it.copy(liveUserText = accumulated) }
                     if (userPrefs.value.autoLanguageDetection) {
                         val detected = VoiceCommandRouter.detectLanguageFromUtterance(accumulated, userPrefs.value.language)
                         if (detected != userPrefs.value.language) {
@@ -533,7 +567,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 }
 
                 override fun onAssistantTranscript(text: String) {
-                    _uiState.value = _uiState.value.copy(liveAssistantText = text)
+                    _uiState.update { it.copy(liveAssistantText = text) }
                 }
 
                 override fun onAssistantSpeakingChanged(isSpeaking: Boolean) {
@@ -546,9 +580,9 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                         return
                     }
 
-                    _uiState.value = _uiState.value.copy(
-                        visualState = if (isSpeaking) AssistantVisualState.SPEAKING else AssistantVisualState.LISTENING
-                    )
+                    _uiState.update {
+                        it.copy(visualState = if (isSpeaking) AssistantVisualState.SPEAKING else AssistantVisualState.LISTENING)
+                    }
                 }
 
                 override fun onToolCall(id: String, action: ToolAction) {
@@ -566,12 +600,15 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                             pendingTranscriptJob?.cancel()
                             toolsManager.execute(action)
                         }
-                        _uiState.value = _uiState.value.copy(lastExecutedTool = result)
-                        if (action.name.equals("changeMood", ignoreCase = true)) {
+                        val targetMood = if (action.name.equals("changeMood", ignoreCase = true)) {
                             val moodName = action.params["mood"]
-                            MahiMood.entries.firstOrNull { it.name.equals(moodName, ignoreCase = true) }?.let {
-                                _uiState.value = _uiState.value.copy(currentMood = it)
-                            }
+                            MahiMood.entries.firstOrNull { it.name.equals(moodName, ignoreCase = true) }
+                        } else null
+                        _uiState.update { cur ->
+                            cur.copy(
+                                lastExecutedTool = result,
+                                currentMood = targetMood ?: cur.currentMood
+                            )
                         }
                         geminiLiveClient.sendToolResponse(
                             callId = id,
@@ -583,15 +620,17 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 }
 
                 override fun onInterrupted() {
-                    _uiState.value = _uiState.value.copy(visualState = AssistantVisualState.LISTENING)
+                    _uiState.update { it.copy(visualState = AssistantVisualState.LISTENING) }
                 }
 
                 override fun onReconnecting(attempt: Int, maxAttempts: Int, reason: String) {
-                    _uiState.value = _uiState.value.copy(
-                        visualState = AssistantVisualState.RECONNECTING,
-                        reconnectMessage = "Reconnecting Live session ($attempt/$maxAttempts)...",
-                        errorMessage = null
-                    )
+                    _uiState.update {
+                        it.copy(
+                            visualState = AssistantVisualState.RECONNECTING,
+                            reconnectMessage = "Reconnecting Live session ($attempt/$maxAttempts)...",
+                            errorMessage = null
+                        )
+                    }
                 }
 
                 override fun onError(error: GeminiLiveError) {
@@ -599,28 +638,32 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                     audioRecordManager.onPcmAudioFrame = null
                     audioRecordManager.stopListening()
                     MahiVoiceForegroundService.stop(getApplication())
-                    _uiState.value = _uiState.value.copy(
-                        visualState = AssistantVisualState.ERROR,
-                        isGeminiLiveActive = false,
-                        isMicActivelyCapturing = false,
-                        reconnectMessage = null,
-                        errorCategory = error.category,
-                        errorMessage = error.message,
-                        waveformBars = List(32) { 0.06f }
-                    )
+                    _uiState.update {
+                        it.copy(
+                            visualState = AssistantVisualState.ERROR,
+                            isGeminiLiveActive = false,
+                            isMicActivelyCapturing = false,
+                            reconnectMessage = null,
+                            errorCategory = error.category,
+                            errorMessage = error.message,
+                            waveformBars = List(32) { 0.06f }
+                        )
+                    }
                 }
 
                 override fun onDisconnected() {
                     audioRecordManager.onPcmAudioFrame = null
                     audioRecordManager.stopListening()
                     MahiVoiceForegroundService.stop(getApplication())
-                    _uiState.value = _uiState.value.copy(
-                        visualState = AssistantVisualState.DISCONNECTED,
-                        isGeminiLiveActive = false,
-                        isMicActivelyCapturing = false,
-                        reconnectMessage = null,
-                        waveformBars = List(32) { 0.06f }
-                    )
+                    _uiState.update {
+                        it.copy(
+                            visualState = AssistantVisualState.DISCONNECTED,
+                            isGeminiLiveActive = false,
+                            isMicActivelyCapturing = false,
+                            reconnectMessage = null,
+                            waveformBars = List(32) { 0.06f }
+                        )
+                    }
                 }
             }
         )
@@ -983,19 +1026,48 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 cardTitle = "End Call"
                 outcomeText = if (ok) "Ended active call" else "No active call found."
             }
+            is RoutedVoiceCommand.ReadNotifications -> {
+                val res = toolsManager.execute(
+                    ToolAction(
+                        name = "readNotifications",
+                        params = if (routed.whatsAppOnly) mapOf("filter" to "whatsapp") else emptyMap()
+                    )
+                )
+                ok = res.isSuccess
+                cardTitle = res.displayTitle
+                outcomeText = res.message
+            }
+            is RoutedVoiceCommand.ReplyWhatsApp -> {
+                val matchingWa = MahiNotificationService.notifications.value.firstOrNull { notif ->
+                    notif.isWhatsApp && notif.canReply &&
+                        (routed.senderHint.isBlank() || notif.senderTitle.contains(routed.senderHint, ignoreCase = true))
+                }
+                if (matchingWa == null) {
+                    ok = false
+                    cardTitle = "WhatsApp Reply"
+                    outcomeText = "No replyable WhatsApp notification found."
+                } else {
+                    cardTitle = "Confirm WhatsApp Reply"
+                    outcomeText = "Review reply to ${matchingWa.senderTitle} in Agent tab before sending."
+                    _requestedTab.value = "AGENT"
+                    sendAuthorizedWhatsAppReply(matchingWa.key, matchingWa.senderTitle, routed.message)
+                }
+            }
         }
 
-        _uiState.value = _uiState.value.copy(
-            liveUserText = originalUtterance.ifBlank { _uiState.value.liveUserText },
-            liveAssistantText = outcomeText,
-            lastExecutedTool = ToolExecutionResult(
-                actionName = cardTitle,
-                displayTitle = cardTitle,
-                message = outcomeText,
-                linkUrl = cardUrl,
-                isSuccess = ok
+        _uiState.update { cur ->
+            cur.copy(
+                liveUserText = originalUtterance.ifBlank { cur.liveUserText },
+                liveAssistantText = outcomeText,
+                lastExecutedTool = ToolExecutionResult(
+                    actionName = cardTitle,
+                    displayTitle = cardTitle,
+                    message = outcomeText,
+                    linkUrl = cardUrl,
+                    isSuccess = ok
+                )
             )
-        )
+        }
         if (!_uiState.value.isMuted && !_uiState.value.isGeminiLiveActive) {
             speakText(outcomeText)
         }

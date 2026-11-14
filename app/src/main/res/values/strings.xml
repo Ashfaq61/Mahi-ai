@@ -3,4 +3,7 @@
     <string name="accessibility_service_description">Mahi AI Screen Intelligence &amp; Automation reads on-screen elements and executes user-approved taps, scrolls, and app controls.</string>
     <string name="notification_service_label">Mahi AI Notification Assistant</string>
     <string name="dialer_activity_label">Mahi AI Phone</string>
+    <string name="wake_popup_title">Mahi AI Wake</string>
+    <string name="wake_popup_listening">Hey! Mahi is listening…</string>
+    <string name="smart_control_title">Smart Smartphone Control</string>
 </resources>

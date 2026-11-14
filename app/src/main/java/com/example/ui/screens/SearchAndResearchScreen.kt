@@ -310,7 +310,10 @@ fun SearchAndResearchScreen(
                     )
                 }
                 SourcesListSection(searchResult.sources) { url ->
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    try {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    } catch (_: Exception) {
+                    }
                 }
             }
         }
@@ -442,7 +445,10 @@ fun SearchAndResearchScreen(
                 }
 
                 SourcesListSection(deepReport.sources) { url ->
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    try {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    } catch (_: Exception) {
+                    }
                 }
             }
         }

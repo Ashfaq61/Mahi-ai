@@ -42,6 +42,8 @@ credentials = "1.5.0"
 googleid = "1.1.1"
 mlkitTextRecognition = "16.0.1"
 mlkitImageLabeling = "17.0.9"
+voskAndroid = "0.3.75"
+jna = "5.18.1"
 
 
 [libraries]
@@ -98,7 +100,10 @@ androidx-credentials = { group = "androidx.credentials", name = "credentials", v
 androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
 googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
 mlkit-text-recognition = { group = "com.google.mlkit", name = "text-recognition", version.ref = "mlkitTextRecognition" }
+mlkit-text-recognition-devanagari = { group = "com.google.mlkit", name = "text-recognition-devanagari", version.ref = "mlkitTextRecognition" }
 mlkit-image-labeling = { group = "com.google.mlkit", name = "image-labeling", version.ref = "mlkitImageLabeling" }
+vosk-android = { group = "com.alphacephei", name = "vosk-android", version.ref = "voskAndroid" }
+jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 
 
 [plugins]

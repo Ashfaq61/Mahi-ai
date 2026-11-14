@@ -157,6 +157,20 @@ class AppLauncherManager(private val context: Context) {
                 ),
                 primaryStorePackage = "",
                 officialWebsiteUrl = ""
+            ),
+            KnownAppDescriptor(
+                canonicalName = "Snapchat",
+                aliases = listOf("snapchat", "snap", "سنیپ چیٹ", "स्नैपचैट"),
+                packageCandidates = listOf("com.snapchat.android"),
+                primaryStorePackage = "com.snapchat.android",
+                officialWebsiteUrl = "https://www.snapchat.com"
+            ),
+            KnownAppDescriptor(
+                canonicalName = "YouTube Music",
+                aliases = listOf("youtube music", "yt music"),
+                packageCandidates = listOf("com.google.android.apps.youtube.music"),
+                primaryStorePackage = "com.google.android.apps.youtube.music",
+                officialWebsiteUrl = "https://music.youtube.com"
             )
         )
 
@@ -184,13 +198,33 @@ class AppLauncherManager(private val context: Context) {
         fun matchKnownApp(query: String): KnownAppDescriptor? {
             val lower = query.lowercase().trim()
             val cleaned = normalizeAppQuery(lower)
-            return KNOWN_APPS.firstOrNull { desc ->
-                desc.aliases.any { alias ->
-                    cleaned == alias ||
-                        Regex("\\b${Regex.escape(alias)}\\b").containsMatchIn(lower) ||
-                        cleaned.contains(alias)
-                } || desc.packageCandidates.any { pkg -> pkg.equals(lower, ignoreCase = true) }
+            if (lower.isBlank() && cleaned.isBlank()) return null
+
+            // Direct package ID match takes highest priority
+            KNOWN_APPS.firstOrNull { desc ->
+                desc.packageCandidates.any { pkg -> pkg.equals(lower, ignoreCase = true) }
+            }?.let { return it }
+
+            // Evaluate exact match first, then longest boundary/substring match so "google chrome" beats "google"
+            var bestDesc: KnownAppDescriptor? = null
+            var bestScore = -1
+            for (desc in KNOWN_APPS) {
+                for (alias in desc.aliases) {
+                    val wordBoundary = Regex("\\b${Regex.escape(alias)}\\b")
+                    val score = when {
+                        cleaned == alias -> 1000 + alias.length
+                        wordBoundary.containsMatchIn(cleaned) -> 500 + alias.length
+                        wordBoundary.containsMatchIn(lower) -> 400 + alias.length
+                        cleaned.contains(alias) -> 200 + alias.length
+                        else -> -1
+                    }
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestDesc = desc
+                    }
+                }
             }
+            return bestDesc
         }
     }
 

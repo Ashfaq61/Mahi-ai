@@ -1,10 +1,10 @@
 package com.example.audio
 
 import android.content.Context
+import android.media.AudioAttributes
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
-import android.speech.tts.Voice
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,7 +24,10 @@ import kotlin.math.sin
  * Manages TextToSpeech tuned specifically for Mahi's witty, sassy, female persona.
  * Generates synchronized live audio visualizer pulses during speech.
  */
-class MahiSpeechSynthesizer(private val context: Context) {
+class MahiSpeechSynthesizer(
+    private val context: Context,
+    private val useVoiceCommunicationAudio: Boolean = false
+) {
     companion object {
         private const val TAG = "MahiSpeechSynthesizer"
     }
@@ -76,6 +79,17 @@ class MahiSpeechSynthesizer(private val context: Context) {
 
     private fun configureVoice() {
         tts?.let { engine ->
+            val usage = if (useVoiceCommunicationAudio) {
+                AudioAttributes.USAGE_VOICE_COMMUNICATION
+            } else {
+                AudioAttributes.USAGE_ASSISTANT
+            }
+            engine.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(usage)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
             val locale = activeLocale
             val availability = engine.isLanguageAvailable(locale)
             engine.language = if (availability >= TextToSpeech.LANG_AVAILABLE) locale else Locale.US

@@ -8,7 +8,9 @@ import android.provider.AlarmClock
 import android.util.Log
 import com.example.automation.AppLauncherManager
 import com.example.automation.AutonomousAgentEngine
+import com.example.automation.DeviceControlHelper
 import com.example.automation.MahiAccessibilityService
+import com.example.automation.MahiNotificationService
 import com.example.automation.VoiceGestureIntent
 import com.example.camera.CameraLensFacing
 import com.example.camera.MahiCameraController
@@ -326,6 +328,36 @@ class MahiToolsManager(
                         actionName = "changeMood",
                         displayTitle = "Mood: $mood",
                         message = "Shifted persona mood to $mood"
+                    )
+                }
+
+                "readnotifications" -> {
+                    val filter = action.params["filter"]?.lowercase().orEmpty()
+                    val list = MahiNotificationService.notifications.value.let { all ->
+                        if (filter.contains("whatsapp")) all.filter { it.isWhatsApp } else all
+                    }
+                    val enabled = MahiNotificationService.isListenerEnabled(context)
+                    val summary = when {
+                        list.isNotEmpty() -> list.take(5).joinToString(" | ") { "${it.appLabel} - ${it.senderTitle}: ${it.messageText}" }
+                        !enabled -> "Notification Access is disabled. Enable Mahi Notification Listener in settings to read alerts."
+                        else -> "No active notifications right now."
+                    }
+                    ToolExecutionResult(
+                        actionName = "readNotifications",
+                        displayTitle = "Notifications (${list.size})",
+                        message = summary,
+                        isSuccess = enabled || list.isNotEmpty()
+                    )
+                }
+
+                "opensettings" -> {
+                    val cat = action.params["category"] ?: "settings"
+                    val out = DeviceControlHelper(context).openSettingsScreen(cat)
+                    ToolExecutionResult(
+                        actionName = "openSettings",
+                        displayTitle = "Settings: ${cat.ifBlank { "System" }}",
+                        message = out.message,
+                        isSuccess = out.success
                     )
                 }
 

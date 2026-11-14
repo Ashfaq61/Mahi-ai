@@ -96,11 +96,14 @@ class DeviceControlHelper(private val context: Context) {
     }
 
     fun openWriteSettingsPermission() {
-        val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
-            data = Uri.parse("package:${context.packageName}")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
+                data = Uri.parse("package:${context.packageName}")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (_: Exception) {
         }
-        context.startActivity(intent)
     }
 
     fun getBrightnessPercent(): Int {
@@ -146,11 +149,18 @@ class DeviceControlHelper(private val context: Context) {
             "notifications" -> Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS
             else -> Settings.ACTION_SETTINGS
         }
-        context.startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        return AutomationOutcome(
-            success = true,
-            message = "Opened ${category.ifBlank { "system" }} settings",
-            verificationDetail = "Dispatched $action"
-        )
+        return try {
+            context.startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            AutomationOutcome(
+                success = true,
+                message = "Opened ${category.ifBlank { "system" }} settings",
+                verificationDetail = "Dispatched $action"
+            )
+        } catch (e: Exception) {
+            AutomationOutcome(
+                success = false,
+                message = e.localizedMessage ?: "Settings screen unavailable on this device"
+            )
+        }
     }
 }

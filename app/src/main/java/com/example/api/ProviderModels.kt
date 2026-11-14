@@ -17,6 +17,7 @@ enum class AiProvider(
         description = "Native Live Audio-to-Audio & multimodal intelligence",
         defaultBaseUrl = "https://generativelanguage.googleapis.com/v1beta",
         defaultModels = listOf(
+            "gemini-2.5-flash-native-audio-preview-12-2025",
             "gemini-2.5-flash-native-audio-preview-09-2025",
             "gemini-2.0-flash-live-001",
             "gemini-3.1-flash-live-preview",

@@ -30,6 +30,8 @@ sealed class RoutedVoiceCommand {
     object AnswerActiveCall : RoutedVoiceCommand()
     object RejectActiveCall : RoutedVoiceCommand()
     object EndActiveCall : RoutedVoiceCommand()
+    data class ReadNotifications(val whatsAppOnly: Boolean = false) : RoutedVoiceCommand()
+    data class ReplyWhatsApp(val senderHint: String, val message: String) : RoutedVoiceCommand()
 
     fun deduplicationKey(): String = when (this) {
         StopEverything -> "STOP"
@@ -50,6 +52,8 @@ sealed class RoutedVoiceCommand {
         AnswerActiveCall -> "ANSWER_CALL"
         RejectActiveCall -> "REJECT_CALL"
         EndActiveCall -> "END_CALL"
+        is ReadNotifications -> "READ_NOTIFS:$whatsAppOnly"
+        is ReplyWhatsApp -> "REPLY_WA:${senderHint.lowercase()}:${message.lowercase()}"
     }
 }
 
@@ -274,9 +278,43 @@ object VoiceCommandRouter {
             }
         }
 
-        // 9. Screen Gesture Engine commands (English, Roman Urdu, Urdu)
+        // 9. Notifications & WhatsApp Reply commands
+        parseNotificationOrWhatsAppCommand(cleanNoWake, lower)?.let { return it }
+
+        // 10. Screen Gesture Engine commands (English, Roman Urdu, Urdu)
         parseGesture(clean, lower)?.let { return RoutedVoiceCommand.ExecuteGesture(it) }
 
+        return null
+    }
+
+    private fun parseNotificationOrWhatsAppCommand(cleanNoWake: String, lower: String): RoutedVoiceCommand? {
+        if ((lower.contains("read") || lower.contains("check") || lower.contains("parho") ||
+                lower.contains("batao") || lower.contains("dikhao") || cleanNoWake.contains("پڑھو")) &&
+            (lower.contains("notification") || lower.contains("messages") || lower.contains("message") ||
+                lower.contains("whatsapp"))
+        ) {
+            return RoutedVoiceCommand.ReadNotifications(whatsAppOnly = lower.contains("whatsapp"))
+        }
+
+        if (lower.startsWith("whatsapp reply ") || lower.startsWith("reply whatsapp ") ||
+            lower.startsWith("reply on whatsapp ")
+        ) {
+            val body = cleanNoWake
+                .replace(Regex("^(whatsapp reply|reply whatsapp|reply on whatsapp)\\s*", RegexOption.IGNORE_CASE), "")
+                .trim()
+            if (body.isNotBlank()) {
+                return RoutedVoiceCommand.ReplyWhatsApp(senderHint = "", message = body)
+            }
+        }
+
+        val replyToRegex = Regex("^reply\\s+(?:to\\s+)?([^:]+?):\\s*(.+)$", RegexOption.IGNORE_CASE)
+        replyToRegex.find(cleanNoWake)?.let { match ->
+            val sender = match.groupValues[1].trim()
+            val msg = match.groupValues[2].trim()
+            if (sender.isNotBlank() && msg.isNotBlank()) {
+                return RoutedVoiceCommand.ReplyWhatsApp(senderHint = sender, message = msg)
+            }
+        }
         return null
     }
 

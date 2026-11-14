@@ -5,10 +5,13 @@ import android.accessibilityservice.GestureDescription
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.provider.Settings
 import android.text.TextUtils
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.CoroutineScope
@@ -166,14 +169,19 @@ class MahiAccessibilityService : AccessibilityService() {
             }
         }
 
-        fun openAccessibilitySettings(context: Context) {
-            context.startActivity(
-                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
+        fun openAccessibilitySettings(context: Context): Boolean {
+            return try {
+                context.startActivity(
+                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                true
+            } catch (_: Exception) {
+                false
+            }
         }
 
-        fun refreshScreenSnapshot(): ScreenSnapshot? {
-            return activeService?.captureCurrentScreen()
+        fun refreshScreenSnapshot(force: Boolean = false): ScreenSnapshot? {
+            return activeService?.captureCurrentScreen(force = force)
         }
 
         fun tapElementByText(query: String): Boolean {
@@ -398,18 +406,90 @@ class MahiAccessibilityService : AccessibilityService() {
         fun pressBack(): Boolean = activeService?.performGlobalAction(GLOBAL_ACTION_BACK) ?: false
 
         fun pressHome(): Boolean = activeService?.performGlobalAction(GLOBAL_ACTION_HOME) ?: false
+
+        fun pressRecents(): Boolean = activeService?.performGlobalAction(GLOBAL_ACTION_RECENTS) ?: false
+
+        fun openNotificationShade(): Boolean =
+            activeService?.performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS) ?: false
+
+        fun openQuickSettings(): Boolean =
+            activeService?.performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS) ?: false
+
+        fun takeScreenshotBitmap(onResult: (Result<Bitmap>) -> Unit) {
+            val svc = activeService
+            if (svc == null) {
+                onResult(
+                    Result.failure(
+                        IllegalStateException(
+                            "Enable Mahi Accessibility Service to capture the current screen."
+                        )
+                    )
+                )
+                return
+            }
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                onResult(
+                    Result.failure(
+                        UnsupportedOperationException(
+                            "Accessibility screenshots require Android 11+ (API 30). Pick a screenshot from Gallery instead."
+                        )
+                    )
+                )
+                return
+            }
+            try {
+                svc.takeScreenshot(
+                    Display.DEFAULT_DISPLAY,
+                    svc.mainExecutor,
+                    object : TakeScreenshotCallback {
+                        override fun onSuccess(screenshot: ScreenshotResult) {
+                            val hw = screenshot.hardwareBuffer
+                            val colorSpace = screenshot.colorSpace
+                            try {
+                                val wrapped = Bitmap.wrapHardwareBuffer(hw, colorSpace)
+                                val soft = wrapped?.copy(Bitmap.Config.ARGB_8888, false)
+                                hw.close()
+                                if (soft != null) {
+                                    recordGesture("SCREENSHOT", "Captured active screen via Accessibility", true)
+                                    onResult(Result.success(soft))
+                                } else {
+                                    onResult(Result.failure(IllegalStateException("Screenshot buffer returned null bitmap.")))
+                                }
+                            } catch (e: Exception) {
+                                try {
+                                    hw.close()
+                                } catch (_: Exception) {
+                                }
+                                onResult(Result.failure(e))
+                            }
+                        }
+
+                        override fun onFailure(errorCode: Int) {
+                            val msg = "Android screenshot failed (code=$errorCode). Some banking/DRM apps block capture."
+                            recordGesture("SCREENSHOT", msg, false)
+                            onResult(Result.failure(IllegalStateException(msg)))
+                        }
+                    }
+                )
+            } catch (e: Exception) {
+                onResult(Result.failure(e))
+            }
+        }
     }
+
+    @Volatile
+    private var lastCaptureMs: Long = 0L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         activeService = this
         _isConnected.value = true
         _gestureStatus.value = "Connected — Accessibility Gesture Engine Ready"
-        captureCurrentScreen()
+        captureCurrentScreen(force = true)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        captureCurrentScreen()
+        captureCurrentScreen(force = false)
     }
 
     override fun onInterrupt() {
@@ -425,18 +505,44 @@ class MahiAccessibilityService : AccessibilityService() {
         _isConnected.value = false
     }
 
-    fun captureCurrentScreen(): ScreenSnapshot? {
-        val root = rootInActiveWindow ?: return null
+    fun captureCurrentScreen(force: Boolean = true): ScreenSnapshot? {
+        val now = System.currentTimeMillis()
+        if (!force && (now - lastCaptureMs) < 180L) {
+            return _screenSnapshot.value
+        }
+        lastCaptureMs = now
+
+        val roots = getCandidateRoots()
+        val root = roots.firstOrNull() ?: return null
         val pkg = root.packageName?.toString().orEmpty()
         val collected = mutableListOf<ScreenElementNode>()
-        traverseNode(root, collected, depth = 0)
+        roots.forEach { windowRoot ->
+            if (collected.size < 60) {
+                traverseNode(windowRoot, collected, depth = 0)
+            }
+        }
         val snapshot = ScreenSnapshot(
             packageName = pkg,
             elements = collected.take(60),
-            capturedAtMs = System.currentTimeMillis()
+            capturedAtMs = now
         )
         _screenSnapshot.value = snapshot
         return snapshot
+    }
+
+    private fun getCandidateRoots(): List<AccessibilityNodeInfo> {
+        val list = mutableListOf<AccessibilityNodeInfo>()
+        rootInActiveWindow?.let { list.add(it) }
+        try {
+            windows?.forEach { window ->
+                val wRoot = window.root
+                if (wRoot != null && wRoot != rootInActiveWindow) {
+                    list.add(wRoot)
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return list
     }
 
     private fun traverseNode(
@@ -474,16 +580,38 @@ class MahiAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun findMatchingNodeAcrossWindows(query: String): AccessibilityNodeInfo? {
+        val lowerQuery = query.trim().lowercase()
+        if (lowerQuery.isBlank()) return null
+        for (root in getCandidateRoots()) {
+            val match = findNodeRecursive(root, lowerQuery)
+            if (match != null) return match
+        }
+        return null
+    }
+
+    private fun dispatchGestureWithCallback(gesture: GestureDescription, label: String): Boolean {
+        val callback = object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                _gestureStatus.value = "$label completed"
+            }
+
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                _gestureStatus.value = "$label cancelled"
+            }
+        }
+        return dispatchGesture(gesture, callback, null)
+    }
+
     private fun performActionOnMatchingNode(query: String, longClick: Boolean): Boolean {
-        val root = rootInActiveWindow ?: return false
-        val target = findNodeRecursive(root, query.trim().lowercase()) ?: return false
+        val target = findMatchingNodeAcrossWindows(query) ?: return false
         val action = if (longClick) AccessibilityNodeInfo.ACTION_LONG_CLICK else AccessibilityNodeInfo.ACTION_CLICK
 
         var cursor: AccessibilityNodeInfo? = target
         while (cursor != null) {
             val canAct = if (longClick) cursor.isLongClickable else cursor.isClickable
             if (canAct && cursor.performAction(action)) {
-                captureCurrentScreen()
+                captureCurrentScreen(force = true)
                 return true
             }
             cursor = cursor.parent
@@ -498,7 +626,7 @@ class MahiAccessibilityService : AccessibilityService() {
             val gesture = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0L, strokeDuration))
                 .build()
-            return dispatchGesture(gesture, null, null)
+            return dispatchGestureWithCallback(gesture, if (longClick) "Long press '$query'" else "Tap '$query'")
         }
         return false
     }
@@ -506,10 +634,7 @@ class MahiAccessibilityService : AccessibilityService() {
     private fun performDoubleTap(query: String): Boolean {
         val cx: Float
         val cy: Float
-        val root = rootInActiveWindow
-        val target = if (query.isNotBlank() && root != null) {
-            findNodeRecursive(root, query.trim().lowercase())
-        } else null
+        val target = if (query.isNotBlank()) findMatchingNodeAcrossWindows(query) else null
 
         if (target != null) {
             val r = Rect()
@@ -528,13 +653,12 @@ class MahiAccessibilityService : AccessibilityService() {
             .addStroke(GestureDescription.StrokeDescription(p1, 0L, 45L))
             .addStroke(GestureDescription.StrokeDescription(p2, 110L, 45L))
             .build()
-        return dispatchGesture(gesture, null, null)
+        return dispatchGestureWithCallback(gesture, "Double tap")
     }
 
     private fun performDragBetweenNodes(fromQuery: String, toQuery: String): Boolean {
-        val root = rootInActiveWindow ?: return false
-        val fromNode = findNodeRecursive(root, fromQuery.trim().lowercase()) ?: return false
-        val toNode = findNodeRecursive(root, toQuery.trim().lowercase()) ?: return false
+        val fromNode = findMatchingNodeAcrossWindows(fromQuery) ?: return false
+        val toNode = findMatchingNodeAcrossWindows(toQuery) ?: return false
         val r1 = Rect()
         val r2 = Rect()
         fromNode.getBoundsInScreen(r1)
@@ -557,7 +681,7 @@ class MahiAccessibilityService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, durationMs))
             .build()
-        return dispatchGesture(gesture, null, null)
+        return dispatchGestureWithCallback(gesture, "Drag")
     }
 
     private fun findNodeRecursive(node: AccessibilityNodeInfo, lowerQuery: String): AccessibilityNodeInfo? {
@@ -565,7 +689,8 @@ class MahiAccessibilityService : AccessibilityService() {
         val t = node.text?.toString()?.lowercase().orEmpty()
         val d = node.contentDescription?.toString()?.lowercase().orEmpty()
         val id = node.viewIdResourceName?.lowercase().orEmpty()
-        if ((t.contains(lowerQuery) || d.contains(lowerQuery) || id.endsWith(lowerQuery)) &&
+        if (node.isVisibleToUser &&
+            (t.contains(lowerQuery) || d.contains(lowerQuery) || id.endsWith(lowerQuery)) &&
             (t.isNotBlank() || d.isNotBlank() || id.isNotBlank())
         ) {
             return node
@@ -575,16 +700,21 @@ class MahiAccessibilityService : AccessibilityService() {
             val match = findNodeRecursive(child, lowerQuery)
             if (match != null) return match
         }
+        if (!node.isVisibleToUser &&
+            (t.contains(lowerQuery) || d.contains(lowerQuery) || id.endsWith(lowerQuery)) &&
+            (t.isNotBlank() || d.isNotBlank() || id.isNotBlank())
+        ) {
+            return node
+        }
         return null
     }
 
     private fun performScrollOnScreen(forward: Boolean, speed: GestureSpeed): Boolean {
-        val root = rootInActiveWindow
-        val scrollable = if (root != null) findLargestScrollableNode(root) else null
+        val scrollable = getCandidateRoots().firstNotNullOfOrNull { findLargestScrollableNode(it) }
         if (speed == GestureSpeed.NORMAL && scrollable != null) {
             val action = if (forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
             if (scrollable.performAction(action)) {
-                captureCurrentScreen()
+                captureCurrentScreen(force = true)
                 return true
             }
         }
@@ -598,7 +728,11 @@ class MahiAccessibilityService : AccessibilityService() {
     private fun findLargestScrollableNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         val scrollables = mutableListOf<AccessibilityNodeInfo>()
         collectScrollables(root, scrollables, 0)
-        return scrollables.maxByOrNull { node ->
+        return scrollables.filter { it.isVisibleToUser }.maxByOrNull { node ->
+            val r = Rect()
+            node.getBoundsInScreen(r)
+            r.width().toLong() * r.height().toLong()
+        } ?: scrollables.maxByOrNull { node ->
             val r = Rect()
             node.getBoundsInScreen(r)
             r.width().toLong() * r.height().toLong()
@@ -622,7 +756,7 @@ class MahiAccessibilityService : AccessibilityService() {
         val dm = resources.displayMetrics
         val fullBounds = Rect(0, 0, dm.widthPixels, dm.heightPixels)
         val targetBounds = if (useScrollableBounds) {
-            val scrollable = rootInActiveWindow?.let { findLargestScrollableNode(it) }
+            val scrollable = getCandidateRoots().firstNotNullOfOrNull { findLargestScrollableNode(it) }
             if (scrollable != null) {
                 val r = Rect()
                 scrollable.getBoundsInScreen(r)
@@ -638,6 +772,6 @@ class MahiAccessibilityService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, speed.durationMs))
             .build()
-        return dispatchGesture(gesture, null, null)
+        return dispatchGestureWithCallback(gesture, "Swipe ${direction.name}")
     }
 }

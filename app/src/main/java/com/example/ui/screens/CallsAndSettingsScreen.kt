@@ -226,9 +226,12 @@ fun CallsAndSettingsScreen(
                 active = capabilities.isDefaultDialer,
                 onClick = {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        val rm = context.getSystemService(Context.ROLE_SERVICE) as? RoleManager
-                        val intent = rm?.createRequestRoleIntent(RoleManager.ROLE_DIALER)
-                        if (intent != null) roleLauncher.launch(intent)
+                        try {
+                            val rm = context.getSystemService(Context.ROLE_SERVICE) as? RoleManager
+                            val intent = rm?.createRequestRoleIntent(RoleManager.ROLE_DIALER)
+                            if (intent != null) roleLauncher.launch(intent)
+                        } catch (_: Exception) {
+                        }
                     }
                 },
                 tag = "request_dialer_role_chip"
@@ -238,9 +241,12 @@ fun CallsAndSettingsScreen(
                 active = capabilities.isCallScreeningApp,
                 onClick = {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        val rm = context.getSystemService(Context.ROLE_SERVICE) as? RoleManager
-                        val intent = rm?.createRequestRoleIntent(RoleManager.ROLE_CALL_SCREENING)
-                        if (intent != null) roleLauncher.launch(intent)
+                        try {
+                            val rm = context.getSystemService(Context.ROLE_SERVICE) as? RoleManager
+                            val intent = rm?.createRequestRoleIntent(RoleManager.ROLE_CALL_SCREENING)
+                            if (intent != null) roleLauncher.launch(intent)
+                        } catch (_: Exception) {
+                        }
                     }
                 },
                 tag = "request_screening_role_chip"

@@ -101,7 +101,7 @@ jobs:
           BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
           SOURCE_APK="app/build/outputs/apk/debug/app-debug.apk"
           ALIGNED_APK="app/build/outputs/apk/debug/app-debug-aligned.apk"
-          FINAL_APK="mahi-ai-debug.apk"
+          FINAL_APK="Mahi-AI-1.1.0-debug.apk"
 
           if [ ! -f "$SOURCE_APK" ]; then
             echo "ERROR: Source APK not found at $SOURCE_APK"
@@ -123,7 +123,7 @@ jobs:
             --out "$FINAL_APK" \
             "$ALIGNED_APK"
 
-          cp "$FINAL_APK" "app/build/outputs/apk/debug/mahi-ai-debug.apk"
+          cp "$FINAL_APK" "app/build/outputs/apk/debug/$FINAL_APK"
 
           if [ ! -s "$FINAL_APK" ]; then
             echo "ERROR: Generated APK is empty or missing!"
@@ -173,18 +173,18 @@ jobs:
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
-            --out mahi-ai-release.apk \
+            --out Mahi-AI-1.1.0-release.apk \
             app/build/outputs/apk/release/app-release-aligned.apk
-          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs mahi-ai-release.apk
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs Mahi-AI-1.1.0-release.apk
           rm -f "$KEYSTORE_PATH"
 
       - name: Upload APK as Workflow Artifact
         uses: actions/upload-artifact@v6
         with:
-          name: mahi-ai-apk
+          name: mahi-ai-1.1.0-apk
           path: |
-            mahi-ai-debug.apk
-            mahi-ai-release.apk
+            Mahi-AI-1.1.0-debug.apk
+            Mahi-AI-1.1.0-release.apk
           if-no-files-found: warn
           retention-days: 30
 
@@ -192,16 +192,16 @@ jobs:
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
         uses: softprops/action-gh-release@v3
         with:
-          name: Mahi AI Voice Assistant v1.0.1 (${{ github.sha }})
-          tag_name: v1.0.${{ github.run_number }}
+          name: Mahi AI Voice Assistant v1.1.0 (${{ github.sha }})
+          tag_name: v1.1.0-${{ github.run_number }}
           body: |
-            ### 🎙️ Mahi AI Voice Assistant - Android APK Release
+            ### 🎙️ Mahi AI Voice Assistant v1.1.0 - Android APK Release
 
             **Build Details:**
             - **Commit:** `${{ github.sha }}`
             - **Workflow Run:** #${{ github.run_number }}
             - **Package ID:** `com.aistudio.mahiai.vzrtkp`
-            - **Version:** `1.0.1` (`versionCode: 2`)
+            - **Version:** `1.1.0` (`versionCode: 12`)
             - **Architectures:** `arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`
             - **Signing:** Standard Android Debug Keystore (v2 + v3 APK Signature Schemes verified)
             - **Alignment:** 16KB page-aligned (`zipalign -P 16 4`)
@@ -209,10 +209,10 @@ jobs:
             - **Size:** `${{ steps.verify_debug_apk.outputs.apk_size }}` bytes
 
             **Download:**
-            Download `mahi-ai-debug.apk` directly from the release assets below.
+            Download `Mahi-AI-1.1.0-debug.apk` (or signed `Mahi-AI-1.1.0-release.apk` when configured) directly from the release assets below.
           files: |
-            mahi-ai-debug.apk
-            mahi-ai-release.apk
+            Mahi-AI-1.1.0-debug.apk
+            Mahi-AI-1.1.0-release.apk
           fail_on_unmatched_files: false
           draft: false
           prerelease: false

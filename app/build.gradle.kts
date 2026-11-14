@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.mahiai.vzrtkp"
     minSdk = 24
     targetSdk = 36
-    versionCode = 2
-    versionName = "1.0.1"
+    versionCode = 12
+    versionName = "1.1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -93,7 +93,16 @@ dependencies {
   implementation(libs.androidx.camera.view)
   implementation(libs.androidx.camera.video)
   implementation(libs.mlkit.text.recognition)
+  implementation(libs.mlkit.text.recognition.devanagari)
   implementation(libs.mlkit.image.labeling)
+  implementation(libs.jna) {
+    artifact {
+      type = "aar"
+    }
+  }
+  implementation(libs.vosk.android) {
+    exclude(group = "net.java.dev.jna", module = "jna")
+  }
   implementation(libs.androidx.compose.material.icons.core)
   implementation(libs.androidx.compose.material.icons.extended)
   implementation(libs.androidx.compose.material3)

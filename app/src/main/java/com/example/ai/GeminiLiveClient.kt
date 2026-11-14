@@ -333,6 +333,26 @@ class GeminiLiveClient(
                     put("required", JSONArray().apply { put("mood") })
                 })
             })
+            put(JSONObject().apply {
+                put("name", "readNotifications")
+                put("description", "Read active captured device notifications including WhatsApp messages.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("filter", JSONObject().apply { put("type", "STRING") })
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "openSettings")
+                put("description", "Open Android system settings screen such as wifi, bluetooth, display, accessibility, or notifications.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("category", JSONObject().apply { put("type", "STRING") })
+                    })
+                })
+            })
         }
 
         fun classifyCloseOrFailureError(code: Int?, reasonOrMessage: String): GeminiLiveError {
@@ -469,7 +489,7 @@ class GeminiLiveClient(
             callbacks.onError(
                 GeminiLiveError(
                     ApiErrorCategory.UNSUPPORTED_MODEL,
-                    "Model '$model' does not support Gemini Live audio-to-audio. Select a Live model (e.g., gemini-2.5-flash-native-audio-preview-09-2025)."
+                    "Model '$model' does not support Gemini Live audio-to-audio. Select a Live model (e.g., gemini-2.5-flash-native-audio-preview-12-2025)."
                 )
             )
             return
@@ -658,12 +678,34 @@ class GeminiLiveClient(
                 }
             }
 
+            if (json.has("goAway")) {
+                val timeLeft = json.optJSONObject("goAway")?.optString("timeLeft").orEmpty()
+                Log.w(TAG, "Gemini Live server goAway received (timeLeft=$timeLeft)")
+                if (!manualDisconnect) {
+                    handleConnectionInterruption(null, "Server requested session refresh ($timeLeft)")
+                    return
+                }
+            }
+
+            val toolCallCancellation = json.optJSONObject("toolCallCancellation")
+            val cancelledIds = mutableSetOf<String>()
+            val idsArray = toolCallCancellation?.optJSONArray("ids")
+            if (idsArray != null) {
+                for (i in 0 until idsArray.length()) {
+                    val cancelledId = idsArray.optString(i)
+                    if (cancelledId.isNotBlank()) {
+                        cancelledIds.add(cancelledId)
+                    }
+                }
+            }
+
             val toolCall = json.optJSONObject("toolCall")
             val functionCalls = toolCall?.optJSONArray("functionCalls")
             if (functionCalls != null) {
                 for (i in 0 until functionCalls.length()) {
                     val call = functionCalls.optJSONObject(i) ?: continue
                     val callId = call.optString("id")
+                    if (callId in cancelledIds) continue
                     val name = call.optString("name")
                     val argsObj = call.optJSONObject("args") ?: JSONObject()
                     val params = mutableMapOf<String, String>()

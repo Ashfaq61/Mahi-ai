@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -46,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -112,11 +114,24 @@ fun CameraStudioScreen(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
     }
 
-    // Safely release camera resources when app pauses or screen is left
+    // Refresh permissions on resume and safely release camera resources when app pauses or screen is left
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
-                cameraController.releaseCamera()
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    hasCameraPermission = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.CAMERA
+                    ) == PackageManager.PERMISSION_GRANTED
+                    hasAudioPermission = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED
+                }
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
+                    cameraController.releaseCamera()
+                }
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -191,23 +206,23 @@ fun CameraStudioScreen(
         ) {
             if (hasCameraPermission) {
                 val previewView = remember(context) { PreviewView(context) }
+                LaunchedEffect(hasCameraPermission, cameraState.lensFacing, hasAudioPermission, lifecycleOwner) {
+                    val future = ProcessCameraProvider.getInstance(context)
+                    future.addListener({
+                        try {
+                            val provider = future.get()
+                            cameraController.bindToLifecycle(
+                                lifecycleOwner = lifecycleOwner,
+                                previewView = previewView,
+                                cameraProvider = provider,
+                                hasAudioPermission = hasAudioPermission
+                            )
+                        } catch (_: Exception) {
+                        }
+                    }, ContextCompat.getMainExecutor(context))
+                }
                 AndroidView(
                     factory = { previewView },
-                    update = { pv ->
-                        val future = ProcessCameraProvider.getInstance(context)
-                        future.addListener({
-                            try {
-                                val provider = future.get()
-                                cameraController.bindToLifecycle(
-                                    lifecycleOwner = lifecycleOwner,
-                                    previewView = pv,
-                                    cameraProvider = provider,
-                                    hasAudioPermission = hasAudioPermission
-                                )
-                            } catch (_: Exception) {
-                            }
-                        }, ContextCompat.getMainExecutor(context))
-                    },
                     modifier = Modifier
                         .fillMaxSize()
                         .testTag("camerax_preview_view")
@@ -482,12 +497,16 @@ fun CameraStudioScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     OutlinedButton(
                         onClick = {
-                            context.startActivity(
-                                cameraController.buildViewMediaIntent(
-                                    cameraState.lastCapturedUri,
-                                    cameraState.lastCapturedIsVideo
+                            try {
+                                context.startActivity(
+                                    cameraController.buildViewMediaIntent(
+                                        cameraState.lastCapturedUri,
+                                        cameraState.lastCapturedIsVideo
+                                    )
                                 )
-                            )
+                            } catch (_: Exception) {
+                                Toast.makeText(context, "No viewer app found for captured media", Toast.LENGTH_SHORT).show()
+                            }
                         },
                         modifier = Modifier.minimumInteractiveComponentSize()
                     ) {
@@ -495,12 +514,16 @@ fun CameraStudioScreen(
                     }
                     OutlinedButton(
                         onClick = {
-                            context.startActivity(
-                                cameraController.buildShareMediaIntent(
-                                    cameraState.lastCapturedUri,
-                                    cameraState.lastCapturedIsVideo
+                            try {
+                                context.startActivity(
+                                    cameraController.buildShareMediaIntent(
+                                        cameraState.lastCapturedUri,
+                                        cameraState.lastCapturedIsVideo
+                                    )
                                 )
-                            )
+                            } catch (_: Exception) {
+                                Toast.makeText(context, "No share target available", Toast.LENGTH_SHORT).show()
+                            }
                         },
                         modifier = Modifier.minimumInteractiveComponentSize()
                     ) {

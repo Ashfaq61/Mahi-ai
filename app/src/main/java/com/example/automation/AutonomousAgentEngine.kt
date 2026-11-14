@@ -284,8 +284,10 @@ Return ONLY a valid JSON array.
             }
             addStep("Open $cat settings", AgentActionType.OPEN_SETTINGS, cat)
         }
-        if (lower.contains("whatsapp") && (lower.contains("read") || lower.contains("check") || lower.contains("notification"))) {
-            addStep("Read latest WhatsApp notifications", AgentActionType.READ_WHATSAPP)
+        if ((lower.contains("whatsapp") || lower.contains("notification") || lower.contains("messages")) &&
+            (lower.contains("read") || lower.contains("check") || lower.contains("notification"))
+        ) {
+            addStep("Read latest notifications / WhatsApp messages", AgentActionType.READ_WHATSAPP)
         }
         if (lower.contains("reply") || lower.contains("send message")) {
             addStep("Send authorized message reply", AgentActionType.SEND_WHATSAPP_REPLY, goal)
@@ -533,24 +535,32 @@ Return ONLY a valid JSON array.
                 }
             }
             AgentActionType.SEND_WHATSAPP_REPLY -> {
-                val latestWa = MahiNotificationService.notifications.value.firstOrNull { it.isWhatsApp && it.canReply }
-                if (latestWa == null) {
+                val replyCandidates = MahiNotificationService.notifications.value.filter { it.isWhatsApp && it.canReply }
+                val targetNotif = replyCandidates.firstOrNull {
+                    it.key == step.param ||
+                        (step.param.isNotBlank() && it.senderTitle.contains(step.param, ignoreCase = true))
+                } ?: replyCandidates.firstOrNull()
+                if (targetNotif == null) {
                     AutomationOutcome(false, "No active WhatsApp notification with reply action available.")
                 } else {
                     val replyBody = step.secondaryParam.ifBlank { step.param }
-                    val res = MahiNotificationService.sendAuthorizedReply(context, latestWa.key, replyBody)
+                    val res = MahiNotificationService.sendAuthorizedReply(context, targetNotif.key, replyBody)
                     AutomationOutcome(
                         success = res.isSuccess,
                         message = res.getOrElse { it.localizedMessage ?: "Reply failed" },
-                        verificationDetail = "Authorized RemoteInput reply sent to ${latestWa.senderTitle}"
+                        verificationDetail = if (res.isSuccess) "Authorized RemoteInput reply sent to ${targetNotif.senderTitle}" else ""
                     )
                 }
             }
             AgentActionType.MAKE_CALL -> {
                 val number = step.param.filter { it.isDigit() || it == '+' }
                 val dialUri = if (number.isNotEmpty()) Uri.parse("tel:$number") else Uri.parse("tel:")
-                context.startActivity(Intent(Intent.ACTION_DIAL, dialUri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                AutomationOutcome(true, "Opened phone dialer with user approval", "ACTION_DIAL intent verified")
+                try {
+                    context.startActivity(Intent(Intent.ACTION_DIAL, dialUri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    AutomationOutcome(true, "Opened phone dialer with user approval", "ACTION_DIAL intent verified")
+                } catch (e: Exception) {
+                    AutomationOutcome(false, e.localizedMessage ?: "No dialer app available")
+                }
             }
             AgentActionType.PURCHASE_ACTION,
             AgentActionType.DELETE_FILE,

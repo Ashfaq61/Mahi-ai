@@ -15,6 +15,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <!-- Telecom Call Automation & Contacts Lookup (explicitly user-granted) -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
@@ -76,8 +78,10 @@
         <package android:name="com.google.android.youtube" />
         <package android:name="com.google.android.youtube.tv" />
         <package android:name="com.google.android.apps.youtube.kids" />
+        <package android:name="com.google.android.apps.youtube.music" />
         <package android:name="com.instagram.android" />
         <package android:name="com.instagram.lite" />
+        <package android:name="com.snapchat.android" />
         <package android:name="com.whatsapp" />
         <package android:name="com.whatsapp.w4b" />
         <package android:name="com.spotify.music" />
@@ -85,6 +89,8 @@
         <package android:name="com.twitter.android" />
         <package android:name="com.android.chrome" />
         <package android:name="com.google.android.apps.maps" />
+        <package android:name="com.google.android.dialer" />
+        <package android:name="com.android.dialer" />
     </queries>
 
     <application
@@ -128,11 +134,32 @@
             </intent-filter>
         </activity>
 
-        <!-- Persistent Microphone Foreground Service for Continuous Gemini Live Voice -->
+        <!-- Translucent Cyber Glow Wake Popup Activity (no SYSTEM_ALERT_WINDOW needed) -->
+        <activity
+            android:name=".WakePopupActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:label="@string/wake_popup_title"
+            android:theme="@style/Theme.MahiWakePopup" />
+
+        <!-- Persistent Microphone Foreground Service for Continuous Gemini Live Voice & Opt-In Wake Detection -->
         <service
             android:name=".audio.MahiVoiceForegroundService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- Restarts opt-in Wake Up Detection after device reboot or app update if user enabled it -->
+        <receiver
+            android:name=".audio.WakeBootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Telecom InCallService (Default Dialer Call Controls & Disclosed AI Assistant) -->
         <service

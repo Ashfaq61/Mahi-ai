@@ -48,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -111,6 +112,18 @@ fun ProviderCard(
     var customModelDraft by remember(config.selectedModel) { mutableStateOf(config.selectedModel) }
     var showCustomModelInput by remember { mutableStateOf(false) }
     var baseUrlDraft by remember(config.customBaseUrl) { mutableStateOf(config.customBaseUrl) }
+
+    LaunchedEffect(keys.map { it.id }) {
+        val currentEditId = editingKeyId
+        if (currentEditId != null && keys.none { it.id == currentEditId }) {
+            editingKeyId = null
+            keyInput = ""
+            labelInput = ""
+        }
+        if (keys.isEmpty()) {
+            showAddForm = true
+        }
+    }
 
     val selectedKey = keys.firstOrNull { it.id == config.selectedKeyId } ?: keys.firstOrNull()
     val providerStatus = selectedKey?.status ?: ConnectionStatus.DISCONNECTED

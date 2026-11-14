@@ -56,7 +56,9 @@ data class MahiUserPrefs(
     val language: AppLanguage = AppLanguage.ENGLISH,
     val themeMode: AppThemeMode = AppThemeMode.DARK,
     val autoLanguageDetection: Boolean = true,
-    val pushToTalkMode: Boolean = false
+    val pushToTalkMode: Boolean = false,
+    val wakeDetectionEnabled: Boolean = false,
+    val memoryConsentGranted: Boolean = false
 )
 
 class MahiPreferencesStore(context: Context) {
@@ -66,6 +68,8 @@ class MahiPreferencesStore(context: Context) {
         private const val KEY_THEME_MODE = "app_theme_mode"
         private const val KEY_AUTO_LANGUAGE = "auto_language_detection"
         private const val KEY_PUSH_TO_TALK = "push_to_talk_mode"
+        private const val KEY_WAKE_DETECTION = "wake_detection_enabled"
+        private const val KEY_MEMORY_CONSENT = "memory_consent_granted"
     }
 
     private val prefs: SharedPreferences =
@@ -79,11 +83,15 @@ class MahiPreferencesStore(context: Context) {
         val theme = AppThemeMode.fromId(prefs.getString(KEY_THEME_MODE, AppThemeMode.DARK.id))
         val autoLang = prefs.getBoolean(KEY_AUTO_LANGUAGE, true)
         val ptt = prefs.getBoolean(KEY_PUSH_TO_TALK, false)
+        val wakeEnabled = prefs.getBoolean(KEY_WAKE_DETECTION, false)
+        val memoryConsent = prefs.getBoolean(KEY_MEMORY_CONSENT, false)
         return MahiUserPrefs(
             language = lang,
             themeMode = theme,
             autoLanguageDetection = autoLang,
-            pushToTalkMode = ptt
+            pushToTalkMode = ptt,
+            wakeDetectionEnabled = wakeEnabled,
+            memoryConsentGranted = memoryConsent
         )
     }
 
@@ -105,5 +113,15 @@ class MahiPreferencesStore(context: Context) {
     fun setPushToTalkMode(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_PUSH_TO_TALK, enabled).commit()
         _prefsFlow.value = _prefsFlow.value.copy(pushToTalkMode = enabled)
+    }
+
+    fun setWakeDetectionEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_WAKE_DETECTION, enabled).commit()
+        _prefsFlow.value = _prefsFlow.value.copy(wakeDetectionEnabled = enabled)
+    }
+
+    fun setMemoryConsentGranted(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_MEMORY_CONSENT, enabled).commit()
+        _prefsFlow.value = _prefsFlow.value.copy(memoryConsentGranted = enabled)
     }
 }
