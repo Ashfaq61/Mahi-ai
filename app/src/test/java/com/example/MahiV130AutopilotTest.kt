@@ -126,6 +126,7 @@ class MahiV130AutopilotTest {
             override suspend fun compareImages() = ToolExecutionResult("ci", "ci", "ok")
             override suspend fun askAboutLastImage(question: String) = ToolExecutionResult("q", "q", "ok")
             override suspend fun performScreenTask(goal: String) = ToolExecutionResult("performScreenTask", "Screen Task", "ok", isSuccess = true)
+            override suspend fun setWatchMode(enabled: Boolean) = ToolExecutionResult("setWatchMode", "Watch Mode", "ok")
             override suspend fun confirmSensitiveAction(title: String, reason: String) = true
         }
         val mgr = MahiToolsManager(appContext, visionDelegate = delegate)

@@ -19,8 +19,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.PowerSettingsNew
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
@@ -208,7 +208,7 @@ fun MahiOrb(
                 AssistantVisualState.CONNECTING -> Icons.Default.Mic
                 AssistantVisualState.LISTENING -> Icons.Default.Mic
                 AssistantVisualState.THINKING -> Icons.Default.Mic
-                AssistantVisualState.SPEAKING -> Icons.Default.VolumeUp
+                AssistantVisualState.SPEAKING -> Icons.AutoMirrored.Filled.VolumeUp
                 AssistantVisualState.RECONNECTING -> Icons.Default.Mic
                 AssistantVisualState.ERROR -> Icons.Default.MicOff
             }

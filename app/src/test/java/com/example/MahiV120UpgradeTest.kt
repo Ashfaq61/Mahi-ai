@@ -262,6 +262,7 @@ class MahiV120UpgradeTest {
             }
             override suspend fun askAboutLastImage(question: String) = ToolExecutionResult("askAboutLastImage", "VQA", "OK")
             override suspend fun performScreenTask(goal: String) = ToolExecutionResult("performScreenTask", "Screen Agent", "Done: $goal", isSuccess = true)
+            override suspend fun setWatchMode(enabled: Boolean) = ToolExecutionResult("setWatchMode", "Watch Mode", "ok")
             override suspend fun confirmSensitiveAction(title: String, reason: String) = false
         }
 

@@ -6,4 +6,6 @@
     <string name="wake_popup_title">Mahi AI Wake</string>
     <string name="wake_popup_listening">Hey! Mahi is listening…</string>
     <string name="smart_control_title">Smart Smartphone Control</string>
+    <string name="screen_doctor_title">Screen Doctor</string>
+    <string name="test_playground_title">Mahi Screen Playground</string>
 </resources>

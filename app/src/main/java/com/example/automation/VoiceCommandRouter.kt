@@ -58,6 +58,10 @@ sealed class RoutedVoiceCommand {
     // Part 7: Screen-Aware Autonomous App Agent
     data class PerformScreenTask(val goal: String) : RoutedVoiceCommand()
 
+    // Section 3A: Continuous Gemini Live Screen Watch Mode
+    object StartWatchMode : RoutedVoiceCommand()
+    object StopWatchMode : RoutedVoiceCommand()
+
     fun deduplicationKey(): String = when (this) {
         StopEverything -> "STOP"
         is LaunchApp -> "LAUNCH:${appName.lowercase()}:${followUpGesture?.actionName.orEmpty()}"
@@ -90,6 +94,8 @@ sealed class RoutedVoiceCommand {
         is TapScreenElement -> "TAP_ELEM:${index ?: query.lowercase()}"
         is TypeOnScreen -> "TYPE_TEXT:${text.lowercase()}:$submit"
         is PerformScreenTask -> "SCREEN_TASK:${goal.lowercase()}"
+        StartWatchMode -> "WATCH_MODE_START"
+        StopWatchMode -> "WATCH_MODE_STOP"
     }
 }
 
@@ -204,7 +210,14 @@ object VoiceCommandRouter {
         val lower = cleanNoWake.lowercase()
         if (lower.isEmpty()) return null
 
-        // 1. Specific Video Recording Stop vs Immediate STOP
+        // 1. Specific Stop Watch Mode, Video Recording Stop vs Immediate STOP
+        if (lower.contains("screen dekhna band") || lower.contains("dekhna band karo") ||
+            lower.contains("stop watching") || lower.contains("watch mode off") ||
+            lower.contains("screen watch off") || cleanNoWake.contains("اسکرین دیکھنا بند")
+        ) {
+            return RoutedVoiceCommand.StopWatchMode
+        }
+
         if (lower.contains("video band") || lower.contains("recording stop") ||
             lower.contains("stop recording") || lower.contains("stop video") ||
             clean.contains("ویڈیو بند") || clean.contains("ریکارڈنگ بند") || clean.contains("वीडियो बंद")
@@ -387,6 +400,12 @@ object VoiceCommandRouter {
                 lower.contains("analyze screenshot") || lower.contains("take screenshot") ||
                 lower.contains("screenshot lo") ->
                 RoutedVoiceCommand.AnalyzeScreenshot(cleanNoWake)
+
+            lower.contains("meri screen dekhti raho") || lower.contains("screen dekhti raho") ||
+                lower.contains("watch my screen") || lower.contains("keep watching screen") ||
+                lower.contains("screen watch on") || lower.contains("watch mode on") ||
+                lower.contains("start watching screen") || cleanNoWake.contains("میری اسکرین دیکھتی رہو") ->
+                RoutedVoiceCommand.StartWatchMode
 
             lower.contains("screen par kya") || lower.contains("screen pe kya") ||
                 lower.contains("what is on screen") || lower.contains("what's on my screen") ||

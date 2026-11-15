@@ -134,6 +134,13 @@
             </intent-filter>
         </activity>
 
+        <!-- Built-in Interactive Test Playground for Screen Engine V2 & Accessibility Self-Test -->
+        <activity
+            android:name=".automation.TestPlaygroundActivity"
+            android:exported="false"
+            android:label="@string/test_playground_title"
+            android:theme="@style/Theme.MyApplication" />
+
         <!-- Translucent Cyber Glow Wake Popup Activity (no SYSTEM_ALERT_WINDOW needed) -->
         <activity
             android:name=".WakePopupActivity"

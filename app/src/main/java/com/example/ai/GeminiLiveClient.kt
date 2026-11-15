@@ -574,6 +574,17 @@ class GeminiLiveClient(
                     put("required", JSONArray().apply { put("goal") })
                 })
             })
+            put(JSONObject().apply {
+                put("name", "setWatchMode")
+                put("description", "Turn Gemini Live continuous Screen Watch Mode ON or OFF so Mahi periodically sees redacted screen frames (~every 2s) and screen summaries when explicitly requested by the user.")
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put("enabled", JSONObject().apply { put("type", "BOOLEAN") })
+                    })
+                    put("required", JSONArray().apply { put("enabled") })
+                })
+            })
         }
 
         fun classifyCloseOrFailureError(code: Int?, reasonOrMessage: String): GeminiLiveError {
@@ -1026,6 +1037,27 @@ class GeminiLiveClient(
                         put("data", b64)
                     })
                 })
+            })
+        }.toString()
+        return webSocket?.send(payload) ?: false
+    }
+
+    /**
+     * Sends silent context updates (like Screen Watch summary diffs) without triggering a turn interruption.
+     */
+    fun sendRealtimeTextHint(text: String): Boolean {
+        if (text.isBlank() || !isConnected || !isSetupComplete || manualDisconnect) return false
+        val payload = JSONObject().apply {
+            put("clientContent", JSONObject().apply {
+                put("turns", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply { put("text", text) })
+                        })
+                    })
+                })
+                put("turnComplete", false)
             })
         }.toString()
         return webSocket?.send(payload) ?: false

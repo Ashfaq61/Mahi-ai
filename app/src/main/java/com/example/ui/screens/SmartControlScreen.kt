@@ -28,8 +28,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Brightness6
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.FlashlightOn
 import androidx.compose.material.icons.filled.PhoneAndroid
@@ -39,8 +41,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Wifi
+import com.example.ui.components.ScreenDoctorModal
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -126,6 +128,14 @@ fun SmartControlScreen(
     val colors = MaterialTheme.colorScheme
     var appQuery by remember { mutableStateOf("") }
     var permTick by remember { mutableIntStateOf(0) }
+    var showScreenDoctor by remember { mutableStateOf(false) }
+
+    if (showScreenDoctor) {
+        ScreenDoctorModal(
+            onDismiss = { showScreenDoctor = false },
+            onOpenPlayground = { showScreenDoctor = false }
+        )
+    }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -299,6 +309,34 @@ fun SmartControlScreen(
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Go to Agent", tint = CyberCyan)
         }
 
+        // 2a. Screen Doctor Diagnostics Card
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(colors.surface)
+                .border(1.dp, CyberCyan.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
+                .clickable { showScreenDoctor = true }
+                .padding(14.dp)
+                .testTag("smart_control_screen_doctor_card"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Icon(Icons.Default.Build, contentDescription = null, tint = CyberCyan, modifier = Modifier.size(22.dp))
+                Spacer(modifier = Modifier.width(12.dp))
+                Column {
+                    Text("Screen Doctor", color = colors.onSurface, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        text = "Live Accessibility diagnostics, countdown check, Playground & Copy Report",
+                        color = colors.onSurfaceVariant,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Open Screen Doctor", tint = CyberCyan)
+        }
+
         // 2b. Allow Autopilot Toggle Shortcut
         Row(
             modifier = Modifier
@@ -402,7 +440,7 @@ fun SmartControlScreen(
             subtitle = "Ringer: ${volumeLevels.ringerMode} • DND Access: ${if (volumeLevels.hasDndPolicyAccess) "Granted" else "Not Granted"}",
             badgeText = "${volumeLevels.mediaPercent}%",
             badgeColor = NeonMagenta,
-            icon = Icons.Default.VolumeUp
+            icon = Icons.AutoMirrored.Filled.VolumeUp
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 VolumeSliderRow("Media", volumeLevels.mediaPercent) { onSetVolumeStream(VolumeStreamType.MEDIA, it) }

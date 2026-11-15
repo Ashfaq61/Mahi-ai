@@ -66,6 +66,7 @@ import com.example.automation.RemoteHttpGroundingProvider
 import com.example.automation.RoutedVoiceCommand
 import com.example.automation.ScreenSnapshot
 import com.example.automation.SensitiveCategory
+import com.example.automation.SetOfMarkGrounding
 import com.example.automation.VoiceCommandRouter
 import com.example.camera.CameraLensFacing
 import com.example.camera.CameraStudioState
@@ -416,6 +417,20 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
             )
         }
 
+        override suspend fun setWatchMode(enabled: Boolean): ToolExecutionResult {
+            return if (enabled) {
+                startWatchMode()
+            } else {
+                stopWatchMode()
+                ToolExecutionResult(
+                    actionName = "setWatchMode",
+                    displayTitle = "Watch Mode OFF",
+                    message = "Stopped watching the screen.",
+                    isSuccess = true
+                )
+            }
+        }
+
         override suspend fun confirmSensitiveAction(title: String, reason: String): Boolean {
             return requestSensitiveConfirmation(title, reason)
         }
@@ -466,6 +481,9 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     val screenSnapshot: StateFlow<ScreenSnapshot> = MahiAccessibilityService.screenSnapshot
     val isReadingScreen: StateFlow<Boolean> = MahiAccessibilityService.isReadingScreen
     val isControllingScreen: StateFlow<Boolean> = autonomousAgentEngine.isControllingScreen
+    private val _isWatchModeActive = MutableStateFlow(false)
+    val isWatchModeActive: StateFlow<Boolean> = _isWatchModeActive.asStateFlow()
+    private var watchModeJob: Job? = null
     val screenAgentStatus: StateFlow<String> = autonomousAgentEngine.screenAgentStatus
     val gestureStatus: StateFlow<String> = MahiAccessibilityService.gestureStatus
     val isContinuousScrolling: StateFlow<Boolean> = MahiAccessibilityService.isContinuousScrolling
@@ -1183,6 +1201,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
     fun stopSession() {
         triggerHaptic()
+        stopWatchMode()
         audioRecordManager.onPcmAudioFrame = null
         audioRecordManager.stopListening()
         speechRecognitionManager.stopListening()
@@ -1390,13 +1409,14 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
         when (routed) {
             RoutedVoiceCommand.StopEverything -> {
+                stopWatchMode()
                 MahiAccessibilityService.stopAllGestures()
                 autonomousAgentEngine.stop()
                 if (cameraController.state.value.isRecordingVideo) {
                     cameraController.stopVideoRecording()
                 }
                 cardTitle = "Stopped Immediately"
-                outcomeText = "Stopped all gestures and running automation."
+                outcomeText = "Stopped watch mode, gestures, and running automation."
             }
             is RoutedVoiceCommand.LaunchApp -> {
                 val res = appLauncherManager.launchApp(routed.appName, openStoreOrWebIfMissing = true)
@@ -1478,10 +1498,10 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 cardTitle = "Camera Zoom"
             }
             is RoutedVoiceCommand.ExecuteGesture -> {
-                val gOut = MahiAccessibilityService.executeGestureIntent(routed.gesture, getApplication())
+                val gOut = MahiAccessibilityService.executeGestureIntentAwait(routed.gesture, getApplication())
                 ok = gOut.success
                 cardTitle = routed.gesture.actionName.replace('_', ' ')
-                outcomeText = gOut.message
+                outcomeText = gOut.localizedMessage(userPrefs.value.language)
             }
             is RoutedVoiceCommand.PlaceCall -> {
                 val goal = if (originalUtterance.isNotBlank()) originalUtterance else "Call ${routed.target}"
@@ -1596,14 +1616,14 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 outcomeText = res.message
             }
             is RoutedVoiceCommand.TapScreenElement -> {
-                val tapOut = MahiAccessibilityService.tapElement(
+                val tapOut = MahiAccessibilityService.tapElementAwait(
                     context = getApplication(),
                     index = routed.index,
                     query = routed.query.takeIf { it.isNotBlank() }
                 )
                 ok = tapOut.success
                 cardTitle = "Tap Screen Element"
-                outcomeText = tapOut.message
+                outcomeText = tapOut.localizedMessage(userPrefs.value.language)
             }
             is RoutedVoiceCommand.TypeOnScreen -> {
                 val res = toolsManager.executeAsync(
@@ -1631,6 +1651,18 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
                 cardTitle = "Smart Control"
                 outcomeText = outcome.message
                 refreshSmartControlTelemetry()
+            }
+            RoutedVoiceCommand.StartWatchMode -> {
+                val res = startWatchMode()
+                ok = res.isSuccess
+                cardTitle = res.displayTitle
+                outcomeText = res.message
+            }
+            RoutedVoiceCommand.StopWatchMode -> {
+                stopWatchMode()
+                ok = true
+                cardTitle = "Watch Mode OFF"
+                outcomeText = "Stopped watching your screen."
             }
             is RoutedVoiceCommand.PerformScreenTask -> {
                 val res = visionToolDelegate.performScreenTask(routed.goal)
@@ -2669,7 +2701,95 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
+    fun startWatchMode(): ToolExecutionResult {
+        val appCtx = getApplication<Application>()
+        if (!MahiAccessibilityService.isServiceEnabled(appCtx)) {
+            MahiAccessibilityService.openAccessibilitySettings(appCtx)
+            return ToolExecutionResult(
+                actionName = "setWatchMode",
+                displayTitle = "Watch Mode Unavailable",
+                message = "Enable Mahi Accessibility Service first to stream password-redacted screen updates.",
+                isSuccess = false
+            )
+        }
+        if (_isWatchModeActive.value && watchModeJob?.isActive == true) {
+            return ToolExecutionResult(
+                actionName = "setWatchMode",
+                displayTitle = "Watch Mode ON",
+                message = "Mahi is already watching your screen (~2s updates).",
+                isSuccess = true
+            )
+        }
+        _isWatchModeActive.value = true
+        MahiAccessibilityService.setWatchModeObserving(true)
+        MahiVoiceForegroundService.showAutopilotNotification(
+            appCtx,
+            "Watching screen (~2s redacted updates) — tap Stop to end"
+        )
+        MahiAccessibilityService.showAutopilotOverlay(
+            stepText = "Watching screen (~2s updates)",
+            titleText = "Mahi Watch Mode ON"
+        )
+        watchModeJob?.cancel()
+        watchModeJob = viewModelScope.launch(Dispatchers.IO) {
+            var lastSentSummary = ""
+            while (_isWatchModeActive.value) {
+                try {
+                    val dm = appCtx.resources.displayMetrics
+                    val screenW = dm.widthPixels.coerceAtLeast(1080)
+                    val screenH = dm.heightPixels.coerceAtLeast(2400)
+                    val bmpRes = MahiAccessibilityService.captureScreenBitmapSuspend()
+                    val snap = MahiAccessibilityService.screenSnapshot.value
+                    bmpRes.onSuccess { bmp ->
+                        try {
+                            val jpeg = SetOfMarkGrounding.redactPasswordsToJpeg(
+                                bitmap = bmp,
+                                snapshot = snap,
+                                screenWidth = screenW,
+                                screenHeight = screenH,
+                                maxDim = 768,
+                                quality = 68
+                            )
+                            if (_uiState.value.isGeminiLiveActive && geminiLiveClient.isSessionActive()) {
+                                geminiLiveClient.sendImageFrame(jpeg)
+                                if (snap.summaryLine.isNotBlank() && snap.summaryLine != lastSentSummary) {
+                                    lastSentSummary = snap.summaryLine
+                                    geminiLiveClient.sendRealtimeTextHint("[Screen Update] ${snap.summaryLine}")
+                                }
+                            }
+                        } finally {
+                            try {
+                                if (!bmp.isRecycled) bmp.recycle()
+                            } catch (_: Exception) {
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+                delay(2_000L)
+            }
+        }
+        return ToolExecutionResult(
+            actionName = "setWatchMode",
+            displayTitle = "Watch Mode ON",
+            message = "Watching your screen (~2s password-redacted updates). Say \"stop watching\" or tap Stop anytime.",
+            isSuccess = true
+        )
+    }
+
+    fun stopWatchMode() {
+        watchModeJob?.cancel()
+        watchModeJob = null
+        _isWatchModeActive.value = false
+        MahiAccessibilityService.setWatchModeObserving(false)
+        if (!autonomousAgentEngine.isRunning.value) {
+            MahiAccessibilityService.hideAutopilotOverlay()
+            MahiVoiceForegroundService.clearAutopilotNotification(getApplication())
+        }
+    }
+
     fun stopAgent() {
+        stopWatchMode()
         autonomousAgentEngine.stop()
         MahiAccessibilityService.stopAllGestures()
         MahiAccessibilityService.hideAutopilotOverlay()
@@ -2882,6 +3002,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
     override fun onCleared() {
         super.onCleared()
+        stopWatchMode()
         pendingTranscriptJob?.cancel()
         wakeWordEngine.stopMicTest()
         wakeWordEngine.abandonActiveVoiceAudioFocus()

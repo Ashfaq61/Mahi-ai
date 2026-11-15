@@ -3,6 +3,7 @@ package com.example.automation
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Bitmap
 import android.net.Uri
 import com.example.api.AiProvider
 import com.example.api.ProviderClient
@@ -689,6 +690,7 @@ Return ONLY a valid JSON array.
         suspend fun swipe(direction: SwipeDirection): AutomationOutcome
         suspend fun pressBack(): AutomationOutcome
         suspend fun captureScreenJpeg(): Result<ByteArray>
+        suspend fun captureScreenBitmap(): Result<Bitmap> = Result.failure(UnsupportedOperationException("Bitmap capture unsupported"))
         fun displaySize(): Pair<Int, Int>
     }
 
@@ -730,43 +732,43 @@ Return ONLY a valid JSON array.
         }
 
         override suspend fun tap(index: Int?, query: String?, viewId: String?, x: Float?, y: Float?): AutomationOutcome =
-            withContext(Dispatchers.Main) {
-                MahiAccessibilityService.tapElement(context, index = index, query = query, viewId = viewId, x = x, y = y)
-            }
+            MahiAccessibilityService.tapElementAwait(
+                context = context,
+                index = index,
+                query = query,
+                viewId = viewId,
+                x = x,
+                y = y
+            ).toAutomationOutcome("Tapped target.")
 
         override suspend fun typeText(index: Int?, query: String?, text: String, submit: Boolean, clearFirst: Boolean): AutomationOutcome =
-            withContext(Dispatchers.Main) {
-                MahiAccessibilityService.typeText(
-                    context = context,
-                    index = index,
-                    query = query,
-                    text = text,
-                    append = false,
-                    clearFirst = clearFirst,
-                    submit = submit
-                )
-            }
+            MahiAccessibilityService.typeTextAwait(
+                context = context,
+                index = index,
+                query = query,
+                text = text,
+                append = false,
+                clearFirst = clearFirst,
+                submit = submit
+            ).toAutomationOutcome("Typed text.")
 
-        override suspend fun scroll(forward: Boolean): AutomationOutcome = withContext(Dispatchers.Main) {
-            val ok = MahiAccessibilityService.scrollScreen(forward, GestureSpeed.NORMAL)
-            AutomationOutcome(ok, if (ok) "Scrolled screen" else "Accessibility scroll failed")
-        }
+        override suspend fun scroll(forward: Boolean): AutomationOutcome =
+            MahiAccessibilityService.scrollScreenAwait(forward, GestureSpeed.NORMAL)
+                .toAutomationOutcome(if (forward) "Scrolled down." else "Scrolled up.")
 
-        override suspend fun swipe(direction: SwipeDirection): AutomationOutcome = withContext(Dispatchers.Main) {
-            val ok = MahiAccessibilityService.swipeScreen(direction, GestureSpeed.NORMAL)
-            AutomationOutcome(ok, if (ok) "Swiped ${direction.name}" else "Accessibility swipe failed")
-        }
+        override suspend fun swipe(direction: SwipeDirection): AutomationOutcome =
+            MahiAccessibilityService.swipeScreenAwait(direction, GestureSpeed.NORMAL)
+                .toAutomationOutcome("Swiped ${direction.name}.")
 
         override suspend fun pressBack(): AutomationOutcome = withContext(Dispatchers.Main) {
             MahiAccessibilityService.navigateBack(context)
         }
 
         override suspend fun captureScreenJpeg(): Result<ByteArray> =
-            kotlinx.coroutines.suspendCancellableCoroutine { cont ->
-                MahiAccessibilityService.captureScreenJpeg(maxDim = 1024, quality = 72) { res ->
-                    if (cont.isActive) cont.resumeWith(Result.success(res))
-                }
-            }
+            MahiAccessibilityService.captureScreenJpegSuspend(maxDim = 768, quality = 72)
+
+        override suspend fun captureScreenBitmap(): Result<Bitmap> =
+            MahiAccessibilityService.captureScreenBitmapSuspend()
 
         override fun displaySize(): Pair<Int, Int> = MahiAccessibilityService.getDisplaySize(context)
     }
@@ -971,15 +973,22 @@ Return ONLY a valid JSON array.
                     driver = driver
                 )
 
-                // If target element was not visible on first look, engage autonomous TargetFinder discovery:
-                // (a) overflow/hidden menu -> (b) scroll down <=6x -> (c) scroll up <=3x -> (d) visual GUI grounding -> (e) ask user
-                if (decision == null || decision.action == ScreenAgentActionType.ASK_USER) {
+                // If target element was not visible on first look (or tree is thin), engage autonomous TargetFinder discovery:
+                // (a) overflow/hidden menu -> (b) scroll down <=6x -> (c) scroll up <=3x -> (d) Set-of-Mark visual grounding -> (e) ask user
+                if (decision == null || decision.action == ScreenAgentActionType.ASK_USER ||
+                    (SetOfMarkGrounding.isThinAccessibilityTree(snapshot) && !triedVisualGrounding &&
+                        snapshot.elements.isEmpty())
+                ) {
                     val discoveredDecision = runTargetFinderStep(
                         goalPhrase = activeGoalPhrase,
                         snapshot = snapshot,
                         recipe = recipe,
                         driver = driver,
                         groundingProvider = effectiveGrounding,
+                        provider = provider,
+                        apiKey = apiKey,
+                        model = model,
+                        baseUrl = baseUrl,
                         triedHiddenMenu = triedHiddenMenu,
                         scrollDownAttempts = scrollDownAttempts,
                         scrollUpAttempts = scrollUpAttempts,
@@ -1085,7 +1094,11 @@ Return ONLY a valid JSON array.
                     snapshot = snapshot,
                     recipe = recipe,
                     driver = driver,
-                    groundingProvider = effectiveGrounding
+                    groundingProvider = effectiveGrounding,
+                    provider = provider,
+                    apiKey = apiKey,
+                    model = model,
+                    baseUrl = baseUrl
                 )
 
                 // Keyboard-obscuring retry resilience
@@ -1211,11 +1224,17 @@ Return ONLY a valid JSON array.
         recipe: AppSkillRecipe,
         driver: ScreenAgentDriver,
         groundingProvider: GuiGroundingProvider,
+        provider: AiProvider? = null,
+        apiKey: String? = null,
+        model: String? = null,
+        baseUrl: String? = null,
         triedHiddenMenu: Boolean,
         scrollDownAttempts: Int,
         scrollUpAttempts: Int,
         triedVisualGrounding: Boolean
     ): TargetFinderResult {
+        val isThinTree = SetOfMarkGrounding.isThinAccessibilityTree(snapshot)
+
         // (a) Check collapsed/overflow menus ("See more", "More options", "...")
         if (!triedHiddenMenu) {
             AppSkills.findHiddenMenuNode(snapshot)?.let { menuNode ->
@@ -1231,7 +1250,40 @@ Return ONLY a valid JSON array.
             }
         }
 
-        // (b) Scroll down up to 6 times to reveal below-the-fold buttons (e.g. Like / Follow / Comment)
+        // (b) If Accessibility tree is thin/unlabeled (WebView/Flutter/canvas), try Set-of-Mark visual mode first
+        if (isThinTree && !triedVisualGrounding) {
+            val bmp = driver.captureScreenBitmap().getOrNull()
+            if (bmp != null) {
+                val (w, h) = driver.displaySize()
+                val somPoint = SetOfMarkGrounding.locateTarget(
+                    bitmap = bmp,
+                    snapshot = snapshot,
+                    targetDescription = goalPhrase,
+                    screenWidth = w,
+                    screenHeight = h,
+                    fallbackGrounding = groundingProvider,
+                    providerClient = providerClient,
+                    provider = provider,
+                    apiKey = apiKey,
+                    model = model,
+                    baseUrl = baseUrl
+                ).getOrNull()
+                if (somPoint != null) {
+                    return TargetFinderResult(
+                        kind = TargetFinderKind.GROUNDED_TAP,
+                        decision = ScreenAgentDecision(
+                            action = ScreenAgentActionType.TAP,
+                            x = somPoint.xPx,
+                            y = somPoint.yPx,
+                            targetQuery = goalPhrase,
+                            reason = "Set-of-Mark (${somPoint.providerName}): tapping visually at (${somPoint.xPx.toInt()},${somPoint.yPx.toInt()})"
+                        )
+                    )
+                }
+            }
+        }
+
+        // (c) Scroll down up to 6 times to reveal below-the-fold buttons (e.g. Like / Follow / Comment)
         if (scrollDownAttempts < 6) {
             return TargetFinderResult(
                 kind = TargetFinderKind.SCROLL_DOWN,
@@ -1243,7 +1295,7 @@ Return ONLY a valid JSON array.
             )
         }
 
-        // (c) Scroll back up up to 3 times if scrolling down passed it
+        // (d) Scroll back up up to 3 times if scrolling down passed it
         if (scrollUpAttempts < 3) {
             return TargetFinderResult(
                 kind = TargetFinderKind.SCROLL_UP,
@@ -1255,28 +1307,44 @@ Return ONLY a valid JSON array.
             )
         }
 
-        // (d) Visual GUI grounding fallback (Gemini or optional user-hosted HTTP endpoint)
+        // (e) Visual GUI grounding fallback (Set-of-Mark annotated screenshot or optional user-hosted server)
         if (!triedVisualGrounding) {
-            val shot = driver.captureScreenJpeg().getOrNull()
-            if (shot != null) {
-                val (w, h) = driver.displaySize()
-                val grounded = groundingProvider.locateTarget(shot, goalPhrase, w, h).getOrNull()
-                if (grounded != null) {
-                    return TargetFinderResult(
-                        kind = TargetFinderKind.GROUNDED_TAP,
-                        decision = ScreenAgentDecision(
-                            action = ScreenAgentActionType.TAP,
-                            x = grounded.xPx,
-                            y = grounded.yPx,
-                            targetQuery = goalPhrase,
-                            reason = "TargetFinder (${grounded.providerName}): tapping visually at (${grounded.xPx.toInt()},${grounded.yPx.toInt()})"
-                        )
-                    )
+            val (w, h) = driver.displaySize()
+            val bmp = driver.captureScreenBitmap().getOrNull()
+            val grounded = if (bmp != null) {
+                SetOfMarkGrounding.locateTarget(
+                    bitmap = bmp,
+                    snapshot = snapshot,
+                    targetDescription = goalPhrase,
+                    screenWidth = w,
+                    screenHeight = h,
+                    fallbackGrounding = groundingProvider,
+                    providerClient = providerClient,
+                    provider = provider,
+                    apiKey = apiKey,
+                    model = model,
+                    baseUrl = baseUrl
+                ).getOrNull()
+            } else {
+                driver.captureScreenJpeg().getOrNull()?.let { shot ->
+                    groundingProvider.locateTarget(shot, goalPhrase, w, h).getOrNull()
                 }
+            }
+            if (grounded != null) {
+                return TargetFinderResult(
+                    kind = TargetFinderKind.GROUNDED_TAP,
+                    decision = ScreenAgentDecision(
+                        action = ScreenAgentActionType.TAP,
+                        x = grounded.xPx,
+                        y = grounded.yPx,
+                        targetQuery = goalPhrase,
+                        reason = "TargetFinder (${grounded.providerName}): tapping visually at (${grounded.xPx.toInt()},${grounded.yPx.toInt()})"
+                    )
+                )
             }
         }
 
-        // (e) Report honestly what Mahi currently sees on screen and ask user
+        // (f) Report honestly what Mahi currently sees on screen and ask user
         val visibleLabels = snapshot.elements.map { it.bestLabel }.filter { it.isNotBlank() }.take(8).joinToString(", ")
         return TargetFinderResult(
             kind = TargetFinderKind.NOT_FOUND,
@@ -1681,7 +1749,11 @@ ${snapshot.readableSummary}
         snapshot: ScreenSnapshot,
         recipe: AppSkillRecipe,
         driver: ScreenAgentDriver,
-        groundingProvider: GuiGroundingProvider
+        groundingProvider: GuiGroundingProvider,
+        provider: AiProvider? = null,
+        apiKey: String? = null,
+        model: String? = null,
+        baseUrl: String? = null
     ): AutomationOutcome {
         return when (decision.action) {
             ScreenAgentActionType.OPEN_APP -> driver.openApp(decision.targetQuery ?: recipe.appName)
@@ -1732,19 +1804,36 @@ ${snapshot.readableSummary}
                     if (hit.success) return hit
                 }
 
-                // Pluggable visual GUI grounding fallback (Gemini or optional user-hosted HTTP endpoint)
-                val shot = driver.captureScreenJpeg().getOrNull()
-                if (shot != null) {
-                    val (w, h) = driver.displaySize()
-                    val grounded = groundingProvider.locateTarget(
-                        jpegBytes = shot,
-                        targetDescription = decision.targetQuery ?: decision.reason,
+                // Set-of-Mark + Pluggable visual GUI grounding fallback
+                val (w, h) = driver.displaySize()
+                val desc = decision.targetQuery ?: decision.reason
+                val bmp = driver.captureScreenBitmap().getOrNull()
+                val grounded = if (bmp != null) {
+                    SetOfMarkGrounding.locateTarget(
+                        bitmap = bmp,
+                        snapshot = snapshot,
+                        targetDescription = desc,
                         screenWidth = w,
-                        screenHeight = h
+                        screenHeight = h,
+                        fallbackGrounding = groundingProvider,
+                        providerClient = providerClient,
+                        provider = provider,
+                        apiKey = apiKey,
+                        model = model,
+                        baseUrl = baseUrl
                     ).getOrNull()
-                    if (grounded != null) {
-                        return driver.tap(null, null, null, grounded.xPx, grounded.yPx)
+                } else {
+                    driver.captureScreenJpeg().getOrNull()?.let { shot ->
+                        groundingProvider.locateTarget(
+                            jpegBytes = shot,
+                            targetDescription = desc,
+                            screenWidth = w,
+                            screenHeight = h
+                        ).getOrNull()
                     }
+                }
+                if (grounded != null) {
+                    return driver.tap(null, null, null, grounded.xPx, grounded.yPx)
                 }
                 primary
             }

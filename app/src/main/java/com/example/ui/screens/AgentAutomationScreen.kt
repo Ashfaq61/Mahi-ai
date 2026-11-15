@@ -19,9 +19,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AccessibilityNew
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.BrightnessHigh
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.NotificationsActive
@@ -31,7 +33,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TouchApp
-import androidx.compose.material.icons.filled.VolumeUp
+import com.example.ui.components.ScreenDoctorModal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -126,6 +128,14 @@ fun AgentAutomationScreen(
     var replyDialogTarget by remember { mutableStateOf<CapturedNotification?>(null) }
     var replyDraft by remember { mutableStateOf("") }
     var automationFeedback by remember { mutableStateOf<String?>(null) }
+    var showScreenDoctor by remember { mutableStateOf(false) }
+
+    if (showScreenDoctor) {
+        ScreenDoctorModal(
+            onDismiss = { showScreenDoctor = false },
+            onOpenPlayground = { showScreenDoctor = false }
+        )
+    }
 
     // Sensitive Action Permission Dialog (Requirement 2 & 6)
     if (pendingConfirmation != null) {
@@ -306,6 +316,13 @@ fun AgentAutomationScreen(
                 icon = Icons.Default.BrightnessHigh,
                 onClick = { deviceControl.openWriteSettingsPermission() },
                 testTag = "enable_write_settings_chip"
+            )
+            PermissionChip(
+                title = "Screen Doctor",
+                active = accessibilityEnabled,
+                icon = Icons.Default.Build,
+                onClick = { showScreenDoctor = true },
+                testTag = "agent_screen_doctor_chip"
             )
         }
 
@@ -818,7 +835,7 @@ fun AgentAutomationScreen(
             )
 
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.VolumeUp, contentDescription = "Volume", tint = NeonMagenta, modifier = Modifier.size(18.dp))
+                Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Volume", tint = NeonMagenta, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Media Volume: ${volumeSlider.toInt()}%", color = colors.onSurface, fontSize = 12.sp)
             }

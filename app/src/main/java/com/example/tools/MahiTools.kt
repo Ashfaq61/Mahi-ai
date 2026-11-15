@@ -51,6 +51,7 @@ interface MahiVisionToolDelegate {
     suspend fun compareImages(): ToolExecutionResult
     suspend fun askAboutLastImage(question: String): ToolExecutionResult
     suspend fun performScreenTask(goal: String): ToolExecutionResult
+    suspend fun setWatchMode(enabled: Boolean): ToolExecutionResult
     suspend fun confirmSensitiveAction(title: String, reason: String): Boolean
 }
 
@@ -87,7 +88,7 @@ class MahiToolsManager(
                             ToolExecutionResult(
                                 actionName = "readScreen",
                                 displayTitle = "Screen Read (${snap.elements.size})",
-                                message = snap.readableSummary,
+                                message = "[snapshotId=${snap.snapshotId}]\n${snap.readableSummary}",
                                 isSuccess = true
                             )
                         },
@@ -106,27 +107,33 @@ class MahiToolsManager(
                     val index = action.params["index"]?.toIntOrNull()
                     val query = action.params["query"] ?: action.params["targetText"]
                     val viewId = action.params["viewId"]
+                    val elementId = action.params["elementId"]
+                    val snapshotId = action.params["snapshotId"]
                     val x = action.params["x"]?.toFloatOrNull()
                     val y = action.params["y"]?.toFloatOrNull()
-                    val out = MahiAccessibilityService.tapElement(
+                    val res = MahiAccessibilityService.tapElementAwait(
                         context = context,
                         index = index,
                         query = query?.takeIf { it.isNotBlank() },
                         viewId = viewId?.takeIf { it.isNotBlank() },
+                        elementId = elementId?.takeIf { it.isNotBlank() },
+                        snapshotId = snapshotId?.takeIf { it.isNotBlank() },
                         x = x,
                         y = y
                     )
                     ToolExecutionResult(
                         actionName = "tapElement",
-                        displayTitle = "Tap Element",
-                        message = out.message,
-                        isSuccess = out.success
+                        displayTitle = if (res.success) "Tap Element" else "Tap Failed",
+                        message = res.toStructuredJson(),
+                        isSuccess = res.success
                     )
                 }
 
                 "typetext" -> {
                     val index = action.params["index"]?.toIntOrNull()
                     val query = action.params["query"] ?: action.params["targetText"]
+                    val elementId = action.params["elementId"]
+                    val snapshotId = action.params["snapshotId"]
                     val text = action.params["text"] ?: ""
                     val append = action.params["append"]?.equals("true", ignoreCase = true) == true
                     val clearFirst = action.params["clearFirst"]?.equals("true", ignoreCase = true) == true
@@ -148,10 +155,12 @@ class MahiToolsManager(
                         }
                     }
 
-                    val out = MahiAccessibilityService.typeText(
+                    val res = MahiAccessibilityService.typeTextAwait(
                         context = context,
                         index = index,
                         query = query?.takeIf { it.isNotBlank() },
+                        elementId = elementId?.takeIf { it.isNotBlank() },
+                        snapshotId = snapshotId?.takeIf { it.isNotBlank() },
                         text = text,
                         append = append,
                         clearFirst = clearFirst,
@@ -160,9 +169,43 @@ class MahiToolsManager(
                     ToolExecutionResult(
                         actionName = "typeText",
                         displayTitle = if (submit) "Typed & Submitted" else "Typed Text",
-                        message = out.message,
-                        isSuccess = out.success
+                        message = res.toStructuredJson(),
+                        isSuccess = res.success
                     )
+                }
+
+                "screengesture" -> {
+                    val gestureAction = action.params["action"] ?: "SWIPE_DOWN"
+                    val targetText = action.params["targetText"].orEmpty()
+                    val res = MahiAccessibilityService.executeGestureIntentAwait(
+                        VoiceGestureIntent(
+                            actionName = gestureAction,
+                            targetText = targetText,
+                            targetIndex = action.params["targetIndex"]?.toIntOrNull(),
+                            startX = action.params["startX"]?.toFloatOrNull(),
+                            startY = action.params["startY"]?.toFloatOrNull(),
+                            endX = action.params["endX"]?.toFloatOrNull(),
+                            endY = action.params["endY"]?.toFloatOrNull()
+                        ),
+                        context = context
+                    )
+                    ToolExecutionResult(
+                        actionName = "screenGesture",
+                        displayTitle = gestureAction.replace('_', ' '),
+                        message = res.toStructuredJson(),
+                        isSuccess = res.success
+                    )
+                }
+
+                "setwatchmode" -> {
+                    val enabled = action.params["enabled"]?.lowercase() in setOf("true", "on", "1", "yes")
+                    visionDelegate?.setWatchMode(enabled)
+                        ?: ToolExecutionResult(
+                            actionName = "setWatchMode",
+                            displayTitle = "Screen Watch Mode",
+                            message = "Watch mode delegate unavailable.",
+                            isSuccess = false
+                        )
                 }
 
                 "capturescreenimage" -> {

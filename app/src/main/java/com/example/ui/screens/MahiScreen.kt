@@ -136,6 +136,7 @@ fun MahiScreen(
     val screenSnapshot by viewModel.screenSnapshot.collectAsStateWithLifecycle()
     val isReadingScreen by viewModel.isReadingScreen.collectAsStateWithLifecycle()
     val isControllingScreen by viewModel.isControllingScreen.collectAsStateWithLifecycle()
+    val isWatchModeActive by viewModel.isWatchModeActive.collectAsStateWithLifecycle()
     val screenAgentStatus by viewModel.screenAgentStatus.collectAsStateWithLifecycle()
     val pendingPhotoPickerMode by viewModel.pendingPhotoPickerMode.collectAsStateWithLifecycle()
     val pendingLiveConfirmation by viewModel.pendingLiveConfirmation.collectAsStateWithLifecycle()
@@ -644,6 +645,40 @@ fun MahiScreen(
                                         modifier = Modifier
                                             .clickable { viewModel.stopAgent() }
                                             .testTag("home_controlling_stop_button")
+                                    )
+                                }
+                            } else if (isWatchModeActive) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(CyberEmerald.copy(alpha = 0.14f))
+                                        .border(1.dp, CyberEmerald.copy(alpha = 0.65f), RoundedCornerShape(14.dp))
+                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                        .testTag("home_watch_mode_chip"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CenterFocusStrong,
+                                        contentDescription = "Watch Mode Active",
+                                        tint = CyberEmerald,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = "Mahi Watch Mode ON (~2s)",
+                                        color = CyberEmerald,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "STOP",
+                                        color = Color(0xFFEF4444),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Black,
+                                        modifier = Modifier
+                                            .clickable { viewModel.stopWatchMode() }
+                                            .testTag("home_watch_mode_stop_button")
                                     )
                                 }
                             } else if (isReadingScreen) {
