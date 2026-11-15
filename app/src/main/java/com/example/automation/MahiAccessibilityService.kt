@@ -9,17 +9,27 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.Path
+import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.text.TextUtils
+import android.util.TypedValue
 import android.view.Display
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import android.widget.LinearLayout
+import android.widget.TextView
 import com.example.vision.NotificationUnderstandingManager
 import com.example.vision.VisionBitmapUtils
 import java.io.ByteArrayOutputStream
@@ -144,16 +154,37 @@ class MahiAccessibilityService : AccessibilityService() {
         private val _isAutopilotObserving = MutableStateFlow(false)
         val isAutopilotObserving: StateFlow<Boolean> = _isAutopilotObserving.asStateFlow()
 
+        private val _isAutopilotOverlayVisible = MutableStateFlow(false)
+        val isAutopilotOverlayVisible: StateFlow<Boolean> = _isAutopilotOverlayVisible.asStateFlow()
+
         private val _screenChangeEvents = MutableSharedFlow<ScreenSnapshot>(extraBufferCapacity = 8)
         val screenChangeEvents: SharedFlow<ScreenSnapshot> = _screenChangeEvents.asSharedFlow()
+
+        var onAutopilotOverlayStopRequested: (() -> Unit)? = null
 
         fun setAutopilotObserving(active: Boolean) {
             _isAutopilotObserving.value = active
             if (!active) {
                 activeService?.debounceWatchJob?.cancel()
                 activeService?.debounceWatchJob = null
+                hideAutopilotOverlay()
             } else {
                 activeService?.captureCurrentScreen(force = true)
+            }
+        }
+
+        fun showAutopilotOverlay(stepText: String) {
+            val svc = activeService ?: return
+            fallbackScope.launch(Dispatchers.Main) {
+                svc.showOrUpdateAutopilotOverlayOnMain(stepText)
+            }
+        }
+
+        fun hideAutopilotOverlay() {
+            _isAutopilotOverlayVisible.value = false
+            val svc = activeService ?: return
+            fallbackScope.launch(Dispatchers.Main) {
+                svc.removeAutopilotOverlayOnMain()
             }
         }
 
@@ -780,6 +811,9 @@ class MahiAccessibilityService : AccessibilityService() {
     private var lastCaptureMs: Long = 0L
 
     private var debounceWatchJob: Job? = null
+    private var overlayRootView: LinearLayout? = null
+    private var overlayStepView: TextView? = null
+    private var overlayLayoutParams: WindowManager.LayoutParams? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -812,11 +846,13 @@ class MahiAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
+        removeAutopilotOverlayOnMain()
         setAutopilotObserving(false)
         stopAllGestures()
     }
 
     override fun onDestroy() {
+        removeAutopilotOverlayOnMain()
         super.onDestroy()
         if (activeService === this) {
             setAutopilotObserving(false)
@@ -824,6 +860,136 @@ class MahiAccessibilityService : AccessibilityService() {
             activeService = null
         }
         _isConnected.value = false
+    }
+
+    private fun dpToPx(dp: Int): Int =
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, dp.toFloat(), resources.displayMetrics).toInt()
+
+    private fun showOrUpdateAutopilotOverlayOnMain(stepText: String) {
+        val cleanStep = stepText.ifBlank { "Executing verified screen action..." }.take(64)
+        val existingStepView = overlayStepView
+        if (overlayRootView != null && existingStepView != null) {
+            existingStepView.text = cleanStep
+            _isAutopilotOverlayVisible.value = true
+            return
+        }
+        try {
+            val wm = getSystemService(WINDOW_SERVICE) as? WindowManager ?: return
+            val container = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dpToPx(14), dpToPx(8), dpToPx(8), dpToPx(8))
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dpToPx(28).toFloat()
+                    setColor(Color.parseColor("#EB0A1020"))
+                    setStroke(dpToPx(2), Color.parseColor("#FF00F0FF"))
+                }
+                elevation = dpToPx(10).toFloat()
+            }
+
+            val dotView = View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(dpToPx(10), dpToPx(10)).apply {
+                    marginEnd = dpToPx(8)
+                }
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.parseColor("#FF00F0FF"))
+                }
+            }
+
+            val textCol = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    dpToPx(176),
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    marginEnd = dpToPx(10)
+                }
+            }
+
+            val titleTv = TextView(this).apply {
+                text = "Mahi is controlling screen"
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setTypeface(typeface, Typeface.BOLD)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }
+
+            val stepTv = TextView(this).apply {
+                text = cleanStep
+                setTextColor(Color.parseColor("#FF7FF8FF"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }
+
+            textCol.addView(titleTv)
+            textCol.addView(stepTv)
+
+            val stopBtn = TextView(this).apply {
+                text = "STOP"
+                contentDescription = "Stop Mahi Autopilot"
+                gravity = Gravity.CENTER
+                minWidth = dpToPx(60)
+                minHeight = dpToPx(48)
+                setPadding(dpToPx(14), dpToPx(8), dpToPx(14), dpToPx(8))
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setTypeface(typeface, Typeface.BOLD)
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dpToPx(20).toFloat()
+                    setColor(Color.parseColor("#FFFF2A85"))
+                }
+                setOnClickListener {
+                    hideAutopilotOverlay()
+                    setAutopilotObserving(false)
+                    stopAllGestures()
+                    onAutopilotOverlayStopRequested?.invoke()
+                }
+            }
+
+            container.addView(dotView)
+            container.addView(textCol)
+            container.addView(stopBtn)
+
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                y = dpToPx(40)
+            }
+
+            wm.addView(container, params)
+            overlayRootView = container
+            overlayStepView = stepTv
+            overlayLayoutParams = params
+            _isAutopilotOverlayVisible.value = true
+        } catch (_: Exception) {
+            overlayRootView = null
+            overlayStepView = null
+            overlayLayoutParams = null
+            _isAutopilotOverlayVisible.value = false
+        }
+    }
+
+    private fun removeAutopilotOverlayOnMain() {
+        _isAutopilotOverlayVisible.value = false
+        val view = overlayRootView ?: return
+        overlayRootView = null
+        overlayStepView = null
+        overlayLayoutParams = null
+        try {
+            val wm = getSystemService(WINDOW_SERVICE) as? WindowManager
+            wm?.removeViewImmediate(view)
+        } catch (_: Exception) {
+        }
     }
 
     fun captureCurrentScreen(force: Boolean = true): ScreenSnapshot? {
@@ -856,6 +1022,9 @@ class MahiAccessibilityService : AccessibilityService() {
         rootInActiveWindow?.let { list.add(it) }
         try {
             windows?.forEach { window ->
+                if (window.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) {
+                    return@forEach
+                }
                 val wRoot = window.root
                 if (wRoot != null && wRoot != rootInActiveWindow) {
                     list.add(wRoot)

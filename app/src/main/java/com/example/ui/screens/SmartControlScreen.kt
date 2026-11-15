@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -99,6 +100,8 @@ fun SmartControlScreen(
     networkInfo: NetworkInfoSnapshot,
     deviceInfo: DeviceInfoSnapshot,
     lastControlStatus: String,
+    autopilotEnabled: Boolean = false,
+    onToggleAutopilot: (Boolean) -> Unit = {},
     onBack: () -> Unit,
     onRefreshAll: () -> Unit,
     onLaunchApp: (String) -> Unit,
@@ -153,6 +156,13 @@ fun SmartControlScreen(
     val hasPhonePerm = remember(permTick) {
         ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+    }
+    val hasPostNotifPerm = remember(permTick) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
     }
 
     Column(
@@ -287,6 +297,41 @@ fun SmartControlScreen(
                 }
             }
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Go to Agent", tint = CyberCyan)
+        }
+
+        // 2b. Allow Autopilot Toggle Shortcut
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(colors.surface)
+                .border(
+                    1.dp,
+                    if (autopilotEnabled) NeonViolet.copy(alpha = 0.6f) else colors.outline,
+                    RoundedCornerShape(16.dp)
+                )
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                Text("Allow Autopilot", color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    text = if (autopilotEnabled) {
+                        "ON — Cross-app tap, scroll & comment steps enabled"
+                    } else {
+                        "OFF — Enable to let Mahi control third-party apps"
+                    },
+                    color = if (autopilotEnabled) CyberEmerald else colors.onSurfaceVariant,
+                    fontSize = 11.sp
+                )
+            }
+            Switch(
+                checked = autopilotEnabled,
+                onCheckedChange = onToggleAutopilot,
+                colors = SwitchDefaults.colors(checkedTrackColor = NeonViolet),
+                modifier = Modifier.testTag("smart_control_autopilot_switch")
+            )
         }
 
         // 3. Quick Settings Card
@@ -487,6 +532,11 @@ fun SmartControlScreen(
                     runtimePermLauncher.launch(
                         arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.CALL_PHONE)
                     )
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    PermissionRow("Notifications (POST_NOTIFICATIONS)", hasPostNotifPerm) {
+                        runtimePermLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+                    }
                 }
                 OutlinedButton(
                     onClick = {

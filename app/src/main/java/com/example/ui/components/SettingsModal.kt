@@ -20,10 +20,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.Button
@@ -87,9 +89,13 @@ fun SettingsModal(
     wakeEnrollmentState: WakeEnrollmentState = WakeEnrollmentState(),
     wakeModelState: WakeModelState = WakeModelState(),
     micTestSnapshot: MicTestSnapshot = MicTestSnapshot(),
+    autopilotEnabled: Boolean = false,
+    learnedLabelCount: Int = 0,
     onOpenApiSettings: () -> Unit = {},
     onOpenSmartControl: () -> Unit = {},
     onOpenHistoryMemory: () -> Unit = {},
+    onToggleAutopilot: (Boolean) -> Unit = {},
+    onClearLearnedLabels: () -> Unit = {},
     onToggleWakeDetection: (Boolean) -> Unit = {},
     onRecordWakeSample: () -> Unit = {},
     onResetWakeEnrollment: () -> Unit = {},
@@ -577,6 +583,94 @@ fun SettingsModal(
                     inactiveTrackColor = colors.outline
                 )
             )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Autopilot Cross-App Screen Control + Learned UI Labels
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(colors.surfaceVariant)
+                    .border(1.dp, NeonViolet.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SmartToy,
+                            contentDescription = null,
+                            tint = NeonViolet,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text(
+                                text = "Allow Autopilot",
+                                color = colors.onSurface,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = if (autopilotEnabled) {
+                                    "ON — Mahi can control apps step-by-step"
+                                } else {
+                                    "OFF by default for safety"
+                                },
+                                color = if (autopilotEnabled) CyberEmerald else colors.onSurfaceVariant,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = autopilotEnabled,
+                        onCheckedChange = onToggleAutopilot,
+                        colors = SwitchDefaults.colors(checkedTrackColor = NeonViolet),
+                        modifier = Modifier.testTag("settings_autopilot_switch")
+                    )
+                }
+
+                Text(
+                    text = "Lets Mahi inspect active app UI elements via Accessibility and tap, type, or scroll step-by-step. Stops immediately on Stop, passwords, CAPTCHAs, permissions, or paywalls.",
+                    color = colors.onSurfaceVariant,
+                    fontSize = 11.sp
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Learned app labels: $learnedLabelCount",
+                        color = colors.onSurface,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedButton(
+                        onClick = onClearLearnedLabels,
+                        enabled = learnedLabelCount > 0,
+                        modifier = Modifier.testTag("settings_clear_learned_labels_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteOutline,
+                            contentDescription = "Clear learned labels",
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Clear ($learnedLabelCount)", fontSize = 11.sp)
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(14.dp))
 

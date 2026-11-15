@@ -161,6 +161,15 @@
             </intent-filter>
         </receiver>
 
+        <!-- Stops active Autopilot session from the ongoing notification safely on Android 12–15 -->
+        <receiver
+            android:name=".audio.AutopilotStopReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.example.audio.ACTION_STOP_AUTOPILOT" />
+            </intent-filter>
+        </receiver>
+
         <!-- Telecom InCallService (Default Dialer Call Controls & Disclosed AI Assistant) -->
         <service
             android:name=".calls.MahiInCallService"

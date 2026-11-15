@@ -83,10 +83,10 @@ class MahiVoiceForegroundService : Service() {
                     Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
-                val stopIntent = PendingIntent.getService(
+                val stopIntent = PendingIntent.getBroadcast(
                     context,
                     4106,
-                    Intent(context, MahiVoiceForegroundService::class.java).apply { action = ACTION_STOP_AUTOPILOT },
+                    Intent(context, AutopilotStopReceiver::class.java).apply { action = ACTION_STOP_AUTOPILOT },
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
                 val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

@@ -47,17 +47,22 @@ import com.example.automation.AgentActionType
 import com.example.automation.AgentPlanStep
 import com.example.automation.AppLaunchResult
 import com.example.automation.AppLauncherManager
+import com.example.automation.AppSkills
 import com.example.automation.AutomationHistoryEntry
 import com.example.automation.AutomationOutcome
 import com.example.automation.AutonomousAgentEngine
 import com.example.automation.CapturedNotification
 import com.example.automation.CommandExecutionGuard
+import com.example.automation.CompositeGuiGroundingProvider
 import com.example.automation.DeviceControlHelper
+import com.example.automation.GeminiGroundingProvider
 import com.example.automation.GestureActionRecord
+import com.example.automation.GuiGroundingProvider
 import com.example.automation.InstalledAppInfo
 import com.example.automation.MahiAccessibilityService
 import com.example.automation.MahiNotificationService
 import com.example.automation.PendingSensitiveConfirmation
+import com.example.automation.RemoteHttpGroundingProvider
 import com.example.automation.RoutedVoiceCommand
 import com.example.automation.ScreenSnapshot
 import com.example.automation.SensitiveCategory
@@ -402,18 +407,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         }
 
         override suspend fun performScreenTask(goal: String): ToolExecutionResult {
-            val state = apiManagerState.value
-            val provider = state.activeProvider
-            val cfg = state.activeConfig
-            val apiKey = secureKeyStore.getActiveDecryptedKey(provider)
-            val result = autonomousAgentEngine.runScreenTask(
-                goal = goal,
-                language = userPrefs.value.language,
-                provider = provider,
-                apiKey = apiKey,
-                model = cfg.selectedModel,
-                baseUrl = cfg.customBaseUrl
-            )
+            val result = executeAutopilotScreenTask(goal = goal, speakFinalResult = false)
             return ToolExecutionResult(
                 actionName = "performScreenTask",
                 displayTitle = if (result.verified) "Screen Task Verified" else "Screen Task",
@@ -481,6 +475,10 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     val isAgentRunning: StateFlow<Boolean> = autonomousAgentEngine.isRunning
     val pendingSensitiveConfirmation: StateFlow<PendingSensitiveConfirmation?> = autonomousAgentEngine.pendingConfirmation
     val automationHistory: StateFlow<List<AutomationHistoryEntry>> = autonomousAgentEngine.historyStore.history
+    val learnedLabelCount: StateFlow<Int> = autonomousAgentEngine.labelMemoryStore.entryCount
+    val remoteGroundingConfig: StateFlow<SecureApiKeyStore.RemoteGroundingConfig> = secureKeyStore.remoteGrounding
+    private val _remoteGroundingStatus = MutableStateFlow<String?>(null)
+    val remoteGroundingStatus: StateFlow<String?> = _remoteGroundingStatus.asStateFlow()
 
     private var liveConfirmationDeferred: CompletableDeferred<Boolean>? = null
     private val _pendingLiveConfirmation = MutableStateFlow<Pair<String, String>?>(null)
@@ -601,6 +599,12 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
 
         MahiVoiceForegroundService.onStopRequestedFromNotification = {
             stopSession()
+        }
+        MahiVoiceForegroundService.onStopAutopilotRequested = {
+            stopAgent()
+        }
+        MahiAccessibilityService.onAutopilotOverlayStopRequested = {
+            stopAgent()
         }
         MahiVoiceForegroundService.onWakeDisabledFromNotification = {
             preferencesStore.setWakeDetectionEnabled(false)
@@ -2500,6 +2504,141 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         cameraController.launchSystemCameraFallback(mode)
     }
 
+    fun setAutopilotEnabled(enabled: Boolean) {
+        preferencesStore.setAutopilotEnabled(enabled)
+        if (!enabled) {
+            stopAgent()
+        }
+    }
+
+    fun clearLearnedAppLabels() {
+        autonomousAgentEngine.labelMemoryStore.clear()
+    }
+
+    fun saveRemoteGrounding(enabled: Boolean, endpointUrl: String, bearerToken: String?) {
+        val cleanUrl = endpointUrl.trim()
+        if (enabled && cleanUrl.isBlank()) {
+            _remoteGroundingStatus.value = "Error: Enter an http(s):// server URL before enabling."
+            return
+        }
+        secureKeyStore.saveRemoteGrounding(enabled = enabled, endpointUrl = cleanUrl, rawToken = bearerToken)
+        _remoteGroundingStatus.value = if (enabled) {
+            "Saved hosted grounding endpoint."
+        } else {
+            "Hosted grounding OFF — Gemini Vision is default."
+        }
+    }
+
+    fun clearRemoteGrounding() {
+        secureKeyStore.clearRemoteGrounding()
+        _remoteGroundingStatus.value = "Cleared hosted grounding settings."
+    }
+
+    fun testRemoteGrounding(endpointUrl: String, rawTokenOverride: String?) {
+        val effectiveToken = rawTokenOverride?.takeIf { it.isNotBlank() }
+            ?: secureKeyStore.getDecryptedRemoteGroundingToken()
+        _remoteGroundingStatus.value = "Testing grounding endpoint..."
+        viewModelScope.launch {
+            val res = RemoteHttpGroundingProvider.testEndpoint(endpointUrl, effectiveToken)
+            _remoteGroundingStatus.value = res.fold(
+                onSuccess = { it },
+                onFailure = { "Error: ${it.localizedMessage ?: "Connection failed"}" }
+            )
+        }
+    }
+
+    private fun buildEffectiveGroundingProvider(
+        provider: AiProvider,
+        apiKey: String?,
+        model: String?,
+        baseUrl: String?
+    ): GuiGroundingProvider {
+        val gemini = GeminiGroundingProvider(
+            providerClient = providerClient,
+            provider = provider,
+            apiKey = apiKey,
+            model = model,
+            baseUrl = baseUrl
+        )
+        val remoteCfg = secureKeyStore.remoteGrounding.value
+        val remote = if (remoteCfg.enabled && remoteCfg.endpointUrl.isNotBlank()) {
+            RemoteHttpGroundingProvider(
+                enabled = true,
+                endpointUrl = remoteCfg.endpointUrl,
+                bearerToken = secureKeyStore.getDecryptedRemoteGroundingToken()
+            )
+        } else {
+            null
+        }
+        return CompositeGuiGroundingProvider(remoteProvider = remote, fallbackProvider = gemini)
+    }
+
+    private suspend fun executeAutopilotScreenTask(
+        goal: String,
+        speakFinalResult: Boolean
+    ): AutonomousAgentEngine.ScreenAgentResult {
+        val state = apiManagerState.value
+        val provider = state.activeProvider
+        val cfg = state.activeConfig
+        val apiKey = secureKeyStore.getActiveDecryptedKey(provider)
+        val autopilotAllowed = userPrefs.value.autopilotEnabled
+        val grounding = buildEffectiveGroundingProvider(
+            provider = provider,
+            apiKey = apiKey,
+            model = cfg.selectedModel,
+            baseUrl = cfg.customBaseUrl
+        )
+        val appCtx = getApplication<Application>()
+        val result = autonomousAgentEngine.runScreenTask(
+            goal = goal,
+            language = userPrefs.value.language,
+            provider = provider,
+            apiKey = apiKey,
+            model = cfg.selectedModel,
+            baseUrl = cfg.customBaseUrl,
+            autopilotAllowed = autopilotAllowed,
+            groundingProvider = grounding,
+            onProgressUpdate = { checkpoint ->
+                if (!_uiState.value.isMuted && !_uiState.value.isGeminiLiveActive) {
+                    speakText(checkpoint)
+                }
+            },
+            onAutopilotNotificationUpdate = { active, statusText ->
+                if (active) {
+                    MahiVoiceForegroundService.showAutopilotNotification(appCtx, statusText)
+                    MahiAccessibilityService.showAutopilotOverlay(statusText)
+                } else {
+                    MahiVoiceForegroundService.clearAutopilotNotification(appCtx)
+                    MahiAccessibilityService.hideAutopilotOverlay()
+                }
+            }
+        )
+        if (!result.completed && !autopilotAllowed) {
+            _uiState.update { cur ->
+                cur.copy(
+                    liveAssistantText = result.summary,
+                    lastExecutedTool = ToolExecutionResult(
+                        actionName = "Autopilot Disabled",
+                        displayTitle = "Autopilot Off",
+                        message = result.summary,
+                        isSuccess = false
+                    )
+                )
+            }
+        }
+        if (speakFinalResult && !_uiState.value.isMuted && !_uiState.value.isGeminiLiveActive) {
+            val targetApp = AppSkills.detectTargetAppInGoal(goal)?.appName.orEmpty()
+            val spoken = AppSkills.formatTerminalAnnouncement(
+                completed = result.completed,
+                appName = targetApp,
+                summary = result.summary,
+                language = userPrefs.value.language
+            )
+            speakText(spoken)
+        }
+        return result
+    }
+
     fun runAgentGoal(goal: String) {
         if (goal.isBlank()) return
         val state = apiManagerState.value
@@ -2507,21 +2646,14 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         val cfg = state.activeConfig
         val apiKey = secureKeyStore.getActiveDecryptedKey(provider)
         val lower = goal.lowercase()
-        val isScreenAppGoal = com.example.automation.AppSkills.detectTargetAppInGoal(goal) != null ||
+        val isScreenAppGoal = AppSkills.detectTargetAppInGoal(goal) != null ||
             listOf("like", "unlike", "follow", "subscribe", "comment", "pehli video", "next video", "save", "wapas")
                 .any { lower.contains(it) } &&
             listOf("volume", "brightness", "wifi", "bluetooth").none { lower.contains(it) }
 
         viewModelScope.launch {
             if (isScreenAppGoal) {
-                autonomousAgentEngine.runScreenTask(
-                    goal = goal,
-                    language = userPrefs.value.language,
-                    provider = provider,
-                    apiKey = apiKey,
-                    model = cfg.selectedModel,
-                    baseUrl = cfg.customBaseUrl
-                )
+                executeAutopilotScreenTask(goal = goal, speakFinalResult = true)
             } else {
                 val steps = autonomousAgentEngine.createPlanForGoal(
                     goal = goal,
@@ -2540,6 +2672,8 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
     fun stopAgent() {
         autonomousAgentEngine.stop()
         MahiAccessibilityService.stopAllGestures()
+        MahiAccessibilityService.hideAutopilotOverlay()
+        MahiVoiceForegroundService.clearAutopilotNotification(getApplication())
     }
 
     fun stopAllGestures() {
@@ -2764,5 +2898,7 @@ class MahiAssistantViewModel(application: Application) : AndroidViewModel(applic
         neuralLensAnalyzer.close()
         autonomousAgentEngine.stop()
         MahiAccessibilityService.stopAllGestures()
+        MahiAccessibilityService.hideAutopilotOverlay()
+        MahiVoiceForegroundService.clearAutopilotNotification(getApplication())
     }
 }

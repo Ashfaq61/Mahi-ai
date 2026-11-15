@@ -187,6 +187,9 @@ fun MahiScreen(
     val canWriteSettings by viewModel.canWriteSettings.collectAsStateWithLifecycle()
     val isFlashlightOn by viewModel.isFlashlightOn.collectAsStateWithLifecycle()
     val smartControlStatus by viewModel.smartControlStatus.collectAsStateWithLifecycle()
+    val learnedLabelCount by viewModel.learnedLabelCount.collectAsStateWithLifecycle()
+    val remoteGroundingConfig by viewModel.remoteGroundingConfig.collectAsStateWithLifecycle()
+    val remoteGroundingStatus by viewModel.remoteGroundingStatus.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -338,6 +341,15 @@ fun MahiScreen(
             onRevealKey = { keyId -> viewModel.revealDecryptedKey(keyId) },
             onModelSelected = { provider, model -> viewModel.setProviderModel(provider, model) },
             onBaseUrlChanged = { provider, url -> viewModel.setProviderBaseUrl(provider, url) },
+            remoteGroundingConfig = remoteGroundingConfig,
+            remoteGroundingStatus = remoteGroundingStatus,
+            onSaveRemoteGrounding = { enabled, url, token ->
+                viewModel.saveRemoteGrounding(enabled, url, token)
+            },
+            onTestRemoteGrounding = { url, token ->
+                viewModel.testRemoteGrounding(url, token)
+            },
+            onClearRemoteGrounding = { viewModel.clearRemoteGrounding() },
             modifier = modifier
         )
         return
@@ -355,6 +367,8 @@ fun MahiScreen(
             networkInfo = networkInfo,
             deviceInfo = deviceInfo,
             lastControlStatus = smartControlStatus,
+            autopilotEnabled = userPrefs.autopilotEnabled,
+            onToggleAutopilot = { viewModel.setAutopilotEnabled(it) },
             onBack = { showSmartControlScreen = false },
             onRefreshAll = { viewModel.refreshSmartControlTelemetry() },
             onLaunchApp = { viewModel.launchAppDirect(it) },
@@ -1181,12 +1195,16 @@ fun MahiScreen(
                     wakeEnrollmentState = wakeEnrollmentState,
                     wakeModelState = wakeModelState,
                     micTestSnapshot = micTestSnapshot,
+                    autopilotEnabled = userPrefs.autopilotEnabled,
+                    learnedLabelCount = learnedLabelCount,
                     onOpenApiSettings = { showApiSettingsScreen = true },
                     onOpenSmartControl = {
                         viewModel.refreshSmartControlTelemetry()
                         showSmartControlScreen = true
                     },
                     onOpenHistoryMemory = { showHistoryMemoryModal = true },
+                    onToggleAutopilot = { viewModel.setAutopilotEnabled(it) },
+                    onClearLearnedLabels = { viewModel.clearLearnedAppLabels() },
                     onToggleWakeDetection = { enabled ->
                         if (enabled) {
                             val needed = buildList {

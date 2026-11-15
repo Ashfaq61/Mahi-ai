@@ -459,18 +459,6 @@ class MahiToolsManager(
                     )
                 }
 
-                "tapelement" -> {
-                    val out = MahiAccessibilityService.tapElement(
-                        context = context,
-                        index = action.params["index"]?.toIntOrNull(),
-                        query = (action.params["query"] ?: action.params["targetText"])?.takeIf { it.isNotBlank() },
-                        viewId = action.params["viewId"]?.takeIf { it.isNotBlank() },
-                        x = action.params["x"]?.toFloatOrNull(),
-                        y = action.params["y"]?.toFloatOrNull()
-                    )
-                    ToolExecutionResult("tapElement", "Tap Element", out.message, isSuccess = out.success)
-                }
-
                 "searchweb" -> {
                     val query = action.params["query"] ?: action.params["q"] ?: "Mahi AI"
                     val target = action.params["target"].orEmpty()

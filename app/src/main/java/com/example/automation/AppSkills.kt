@@ -1,5 +1,6 @@
 package com.example.automation
 
+import com.example.preferences.AppLanguage
 import org.json.JSONObject
 
 enum class ScreenAgentActionType(val wireName: String) {
@@ -56,19 +57,19 @@ object AppSkills {
         id = "facebook",
         appName = "Facebook",
         packageNames = listOf("com.facebook.katana", "com.facebook.lite"),
-        searchCues = listOf("search facebook", "search", "find", "talash"),
+        searchCues = listOf("search facebook", "search", "find", "talash", "dhundo", "تلاش"),
         actionVariants = mapOf(
-            "search" to listOf("search", "search facebook", "find friends", "search icon"),
-            "video_tab" to listOf("video", "watch", "reels", "reels and short videos"),
-            "play" to listOf("play", "watch", "video", "reel", "unmute"),
-            "like" to listOf("like", "react", "thumbs up", "like button"),
-            "unlike" to listOf("unlike", "liked", "remove reaction"),
-            "comment" to listOf("comment", "write a comment", "add a comment", "comment box"),
-            "post_comment" to listOf("send", "post", "submit", "comment"),
-            "follow" to listOf("follow", "add friend", "join"),
+            "search" to listOf("search", "search facebook", "find friends", "search icon", "talash", "dhundo", "تلاش"),
+            "video_tab" to listOf("video", "watch", "reels", "reels and short videos", "videos"),
+            "play" to listOf("play", "watch", "video", "reel", "unmute", "chalao", "chala do", "دیکھیں"),
+            "like" to listOf("like", "react", "thumbs up", "like button", "pasand", "لائک"),
+            "unlike" to listOf("unlike", "liked", "remove reaction", "like hatao"),
+            "comment" to listOf("comment", "write a comment", "add a comment", "comment box", "tabsra", "کمنٹ"),
+            "post_comment" to listOf("send", "post", "submit", "comment", "bhejo", "بھیجیں"),
+            "follow" to listOf("follow", "add friend", "join", "فالو"),
             "following" to listOf("following", "requested", "friends"),
-            "save" to listOf("save", "save video", "save post", "bookmark"),
-            "share" to listOf("share")
+            "save" to listOf("save", "save video", "save post", "bookmark", "mehfooz", "سیو"),
+            "share" to listOf("share", "شیئر")
         ),
         relativeHints = listOf(
             "Top row houses Home/Friends/Watch(Video)/Profile tabs and a Search magnifying-glass icon near the top right.",
@@ -87,19 +88,19 @@ object AppSkills {
         id = "youtube",
         appName = "YouTube",
         packageNames = listOf("com.google.android.youtube", "com.google.android.apps.youtube.music"),
-        searchCues = listOf("search youtube", "search"),
+        searchCues = listOf("search youtube", "search", "talash", "dhundo", "تلاش"),
         actionVariants = mapOf(
-            "search" to listOf("search", "search youtube"),
-            "play" to listOf("play", "minutes", "seconds", "views", "watch"),
-            "like" to listOf("like this video", "i like this", "like"),
-            "unlike" to listOf("unlike", "liked", "remove like"),
-            "subscribe" to listOf("subscribe", "subscribe to"),
+            "search" to listOf("search", "search youtube", "talash", "dhundo", "تلاش"),
+            "play" to listOf("play", "minutes", "seconds", "views", "watch", "chalao", "دیکھیں"),
+            "like" to listOf("like this video", "i like this", "like", "pasand", "لائک"),
+            "unlike" to listOf("unlike", "liked", "remove like", "like hatao"),
+            "subscribe" to listOf("subscribe", "subscribe to", "سبسکرائب"),
             "subscribed" to listOf("subscribed", "unsubscribe"),
-            "comment" to listOf("comments", "add a comment", "add a comment..."),
-            "post_comment" to listOf("comment", "send", "post"),
-            "save" to listOf("save", "save to playlist", "saved"),
-            "next" to listOf("next", "next video"),
-            "share" to listOf("share")
+            "comment" to listOf("comments", "add a comment", "add a comment...", "کمنٹ"),
+            "post_comment" to listOf("comment", "send", "post", "bhejo", "بھیجیں"),
+            "save" to listOf("save", "save to playlist", "saved", "سیو"),
+            "next" to listOf("next", "next video", "agla", "اگلا"),
+            "share" to listOf("share", "شیئر")
         ),
         relativeHints = listOf(
             "Search magnifying glass sits in the top toolbar.",
@@ -118,18 +119,18 @@ object AppSkills {
         id = "instagram",
         appName = "Instagram",
         packageNames = listOf("com.instagram.android", "com.instagram.lite"),
-        searchCues = listOf("search and explore", "search"),
+        searchCues = listOf("search and explore", "search", "talash", "تلاش"),
         actionVariants = mapOf(
-            "search" to listOf("search and explore", "search"),
-            "play" to listOf("reel", "video", "watch"),
-            "like" to listOf("like", "double tap to like"),
-            "unlike" to listOf("unlike", "liked"),
-            "follow" to listOf("follow", "follow back"),
+            "search" to listOf("search and explore", "search", "talash", "تلاش"),
+            "play" to listOf("reel", "video", "watch", "chalao", "دیکھیں"),
+            "like" to listOf("like", "double tap to like", "pasand", "لائک"),
+            "unlike" to listOf("unlike", "liked", "like hatao"),
+            "follow" to listOf("follow", "follow back", "فالو"),
             "following" to listOf("following", "requested"),
-            "comment" to listOf("comment", "add a comment"),
-            "post_comment" to listOf("post", "send"),
-            "save" to listOf("save", "add to saved"),
-            "share" to listOf("share", "send")
+            "comment" to listOf("comment", "add a comment", "کمنٹ"),
+            "post_comment" to listOf("post", "send", "bhejo", "بھیجیں"),
+            "save" to listOf("save", "add to saved", "سیو"),
+            "share" to listOf("share", "send", "شیئر")
         ),
         relativeHints = listOf(
             "Bottom navigation holds Home, Search, Create, Reels, Profile.",
@@ -147,19 +148,19 @@ object AppSkills {
         id = "tiktok",
         appName = "TikTok",
         packageNames = listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill"),
-        searchCues = listOf("search", "find related content"),
+        searchCues = listOf("search", "find related content", "talash", "تلاش"),
         actionVariants = mapOf(
-            "search" to listOf("search"),
-            "play" to listOf("play", "video", "watch"),
-            "like" to listOf("like", "like video"),
+            "search" to listOf("search", "talash", "تلاش"),
+            "play" to listOf("play", "video", "watch", "chalao"),
+            "like" to listOf("like", "like video", "pasand", "لائک"),
             "unlike" to listOf("unlike", "liked"),
-            "follow" to listOf("follow", "follow creator"),
+            "follow" to listOf("follow", "follow creator", "فالو"),
             "following" to listOf("following", "friends"),
-            "comment" to listOf("comment", "read or add comments", "add comment"),
-            "post_comment" to listOf("send", "post"),
-            "save" to listOf("add to favorites", "favorite", "save"),
-            "next" to listOf("next", "swipe up for next"),
-            "share" to listOf("share")
+            "comment" to listOf("comment", "read or add comments", "add comment", "کمنٹ"),
+            "post_comment" to listOf("send", "post", "bhejo"),
+            "save" to listOf("add to favorites", "favorite", "save", "سیو"),
+            "next" to listOf("next", "swipe up for next", "agla", "اگلی"),
+            "share" to listOf("share", "شیئر")
         ),
         relativeHints = listOf(
             "Right-side vertical rail stacks Profile Avatar/+Follow, Heart (Like), Comments, Bookmark (Favorite/Save), Share.",
@@ -176,12 +177,12 @@ object AppSkills {
         id = "whatsapp",
         appName = "WhatsApp",
         packageNames = listOf("com.whatsapp", "com.whatsapp.w4b"),
-        searchCues = listOf("search", "ask meta ai or search"),
+        searchCues = listOf("search", "ask meta ai or search", "talash", "تلاش"),
         actionVariants = mapOf(
-            "search" to listOf("search", "ask meta ai or search"),
-            "comment" to listOf("message", "type a message"),
-            "post_comment" to listOf("send"),
-            "play" to listOf("play", "voice message")
+            "search" to listOf("search", "ask meta ai or search", "talash", "تلاش"),
+            "comment" to listOf("message", "type a message", "paigham", "پیغام"),
+            "post_comment" to listOf("send", "bhejo", "بھیجیں"),
+            "play" to listOf("play", "voice message", "chalao")
         ),
         relativeHints = listOf(
             "Chats list shows Search bar or Search icon at top.",
@@ -196,12 +197,12 @@ object AppSkills {
         id = "chrome",
         appName = "Chrome",
         packageNames = listOf("com.android.chrome", "com.chrome.beta"),
-        searchCues = listOf("search or type web address", "search or type url", "url bar", "address bar"),
+        searchCues = listOf("search or type web address", "search or type url", "url bar", "address bar", "talash", "تلاش"),
         actionVariants = mapOf(
-            "search" to listOf("search or type web address", "search or type url", "search", "omnibox"),
-            "play" to listOf("play", "video", "watch"),
-            "save" to listOf("bookmark", "star", "download"),
-            "back" to listOf("back", "navigate up")
+            "search" to listOf("search or type web address", "search or type url", "search", "omnibox", "talash", "تلاش"),
+            "play" to listOf("play", "video", "watch", "chalao"),
+            "save" to listOf("bookmark", "star", "download", "سیو"),
+            "back" to listOf("back", "navigate up", "wapis", "واپس")
         ),
         relativeHints = listOf(
             "Address/Search box (omnibox) sits at the top toolbar alongside tab switcher and 3-dot menu."
@@ -215,19 +216,19 @@ object AppSkills {
         id = "generic",
         appName = "Current App",
         packageNames = emptyList(),
-        searchCues = listOf("search", "find", "filter"),
+        searchCues = listOf("search", "find", "filter", "talash", "dhundo", "تلاش"),
         actionVariants = mapOf(
-            "search" to listOf("search", "find", "filter"),
-            "play" to listOf("play", "watch", "start", "open"),
-            "like" to listOf("like", "heart", "favorite", "thumbs up"),
-            "unlike" to listOf("unlike", "liked"),
-            "follow" to listOf("follow", "subscribe"),
+            "search" to listOf("search", "find", "filter", "talash", "dhundo", "تلاش"),
+            "play" to listOf("play", "watch", "start", "open", "chalao", "kholo", "دیکھیں"),
+            "like" to listOf("like", "heart", "favorite", "thumbs up", "pasand", "لائک"),
+            "unlike" to listOf("unlike", "liked", "like hatao"),
+            "follow" to listOf("follow", "subscribe", "فالو", "سبسکرائب"),
             "following" to listOf("following", "subscribed"),
-            "comment" to listOf("comment", "reply", "write"),
-            "post_comment" to listOf("post", "send", "submit"),
-            "save" to listOf("save", "bookmark", "favorite"),
-            "next" to listOf("next", "skip"),
-            "share" to listOf("share")
+            "comment" to listOf("comment", "reply", "write", "likho", "کمنٹ"),
+            "post_comment" to listOf("post", "send", "submit", "bhejo", "بھیجیں"),
+            "save" to listOf("save", "bookmark", "favorite", "mehfooz", "سیو"),
+            "next" to listOf("next", "skip", "agla", "aage", "اگلا"),
+            "share" to listOf("share", "bhejo", "شیئر")
         ),
         relativeHints = listOf(
             "Prefer clickable elements matching action labels, viewIds, or visual layout position."
@@ -531,6 +532,38 @@ object AppSkills {
             l.contains("search") -> "Search query submitted and results screen updated."
             l.contains("video") || l.contains("play") || l.contains("chalao") -> "Video/reel playback or player screen opened."
             else -> "Target UI action verified by updated screen hierarchy."
+        }
+    }
+
+    fun formatProgressCheckpoint(
+        appName: String,
+        stepCount: Int,
+        language: AppLanguage = AppLanguage.ENGLISH
+    ): String {
+        val safeApp = appName.ifBlank { "current app" }
+        return when (language) {
+            AppLanguage.ROMAN_URDU ->
+                "Abhi $safeApp par kaam jari hai — $stepCount steps mukammal ho gaye."
+            AppLanguage.URDU ->
+                "ابھی $safeApp پر کام جاری ہے — $stepCount مراحل مکمل ہو گئے ہیں۔"
+            AppLanguage.ENGLISH ->
+                "Still working on $safeApp — $stepCount steps done."
+        }
+    }
+
+    fun formatTerminalAnnouncement(
+        completed: Boolean,
+        appName: String,
+        summary: String,
+        language: AppLanguage = AppLanguage.ENGLISH
+    ): String {
+        val clean = summary.trim()
+        if (completed) return clean
+        val safeApp = appName.ifBlank { "the screen" }
+        return when (language) {
+            AppLanguage.ROMAN_URDU -> "Autopilot $safeApp par ruk gaya: $clean"
+            AppLanguage.URDU -> "آٹو پائلٹ $safeApp پر رک گیا: $clean"
+            AppLanguage.ENGLISH -> clean
         }
     }
 }

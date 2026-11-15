@@ -957,14 +957,6 @@ Return ONLY a valid JSON array.
 
                 val recipe = AppSkills.forPackage(snapshot.packageName, activeGoalPhrase)
 
-                // Checkpoint announcement every 10 actions
-                if (stepsExecuted > 0 && stepsExecuted / 10 > lastCheckpointAt) {
-                    lastCheckpointAt = stepsExecuted / 10
-                    val checkpointMsg = "Checkpoint ($stepsExecuted/$maxActionsPerSession actions): working on \"${currentSubGoal.title}\"."
-                    onProgressUpdate(checkpointMsg)
-                    onAutopilotNotificationUpdate(true, checkpointMsg)
-                }
-
                 // 2. THINK (AI planner + deterministic heuristic + TargetFinder)
                 var decision = thinkNextScreenAction(
                     goal = activeGoalPhrase,
@@ -1081,8 +1073,11 @@ Return ONLY a valid JSON array.
                 val stepId = appendLiveStep(stepTitle, mapToAgentActionType(decision.action), StepExecutionStatus.RUNNING, "Executing...")
                 _screenAgentStatus.value = stepTitle
                 onAutopilotNotificationUpdate(true, "Step $stepsExecuted/$maxActionsPerSession: $stepTitle")
-                if (stepsExecuted == 1 || stepsExecuted % 3 == 0) {
-                    onProgressUpdate(stepTitle)
+                if (stepsExecuted > 0 && stepsExecuted % 10 == 0 && stepsExecuted / 10 > lastCheckpointAt) {
+                    lastCheckpointAt = stepsExecuted / 10
+                    val checkpointMsg = AppSkills.formatProgressCheckpoint(recipe.appName, stepsExecuted, language)
+                    onProgressUpdate(checkpointMsg)
+                    onAutopilotNotificationUpdate(true, checkpointMsg)
                 }
 
                 var actOutcome = executeScreenDecision(
@@ -1134,7 +1129,10 @@ Return ONLY a valid JSON array.
                     completedHistory.add("${decision.action.wireName}(${decision.targetQuery ?: decision.text ?: ""}) -> OK")
 
                     // Record successful button label variant in per-app memory
-                    val matchedLabel = decision.targetQuery?.trim().orEmpty()
+                    val nodeLabel = decision.targetIndex?.let { idx ->
+                        snapshot.elements.firstOrNull { it.index == idx }?.bestLabel
+                    }?.takeIf { it.isNotBlank() }
+                    val matchedLabel = decision.targetQuery?.trim()?.takeIf { it.isNotBlank() } ?: nodeLabel.orEmpty()
                     val canonicalAction = inferCanonicalActionKey(activeGoalPhrase, decision)
                     if (canonicalAction != null && matchedLabel.isNotBlank()) {
                         labelMemoryStore.recordSuccess(snapshot.packageName, canonicalAction, matchedLabel)
@@ -1426,7 +1424,11 @@ ${snapshot.readableSummary}
             if (editable != null) {
                 val postText = commentText ?: "Great post!"
                 if (alreadyTyped) {
-                    val sendBtn = findBestMatchingNode(snapshot, recipe.actionVariants["post_comment"].orEmpty() + listOf("post", "send"))
+                    val sendBtn = findBestMatchingNode(
+                        snapshot,
+                        labelMemoryStore.getVariants(snapshot.packageName, "post_comment") +
+                            recipe.actionVariants["post_comment"].orEmpty() + listOf("post", "send")
+                    )
                     return if (sendBtn != null) {
                         ScreenAgentDecision(
                             action = ScreenAgentActionType.TAP,
@@ -1547,7 +1549,11 @@ ${snapshot.readableSummary}
 
         // Handle Next Video
         if (lowerGoal.contains("next video") || lowerGoal.contains("agla video")) {
-            val nextNode = findBestMatchingNode(snapshot, recipe.actionVariants["next"].orEmpty() + listOf("next"))
+            val nextNode = findBestMatchingNode(
+                snapshot,
+                labelMemoryStore.getVariants(snapshot.packageName, "next") +
+                    recipe.actionVariants["next"].orEmpty() + listOf("next")
+            )
             return if (nextNode != null) {
                 ScreenAgentDecision(action = ScreenAgentActionType.TAP, targetIndex = nextNode.index, targetQuery = nextNode.bestLabel, reason = "Advancing to next video")
             } else {
@@ -1600,13 +1606,16 @@ ${snapshot.readableSummary}
     private fun inferCanonicalActionKey(goalPhrase: String, decision: ScreenAgentDecision): String? {
         if (decision.action != ScreenAgentActionType.TAP) return null
         val l = goalPhrase.lowercase()
+        val q = decision.targetQuery?.lowercase().orEmpty()
         return when {
             l.contains("unlike") || l.contains("like hata") -> "unlike"
             l.contains("like") -> "like"
             l.contains("subscribe") -> "subscribe"
             l.contains("follow") -> "follow"
+            l.contains("comment") && (q in listOf("post", "send", "submit", "bhejo")) -> "post_comment"
             l.contains("comment") -> "comment"
             l.contains("save") || l.contains("bookmark") -> "save"
+            l.contains("next video") || l.contains("agla video") || q == "next" -> "next"
             l.contains("search") -> "search"
             l.contains("video") || l.contains("play") || l.contains("chalao") -> "play"
             else -> null

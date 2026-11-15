@@ -200,6 +200,46 @@ class RemoteHttpGroundingProvider(
 
     companion object {
         private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
+
+        suspend fun testEndpoint(
+            endpointUrl: String,
+            bearerToken: String?,
+            okHttpClient: OkHttpClient = ProviderClient.defaultOkHttpClient()
+        ): Result<String> = withContext(Dispatchers.IO) {
+            val trimmed = endpointUrl.trim()
+            if (trimmed.isEmpty() || (!trimmed.startsWith("https://", ignoreCase = true) && !trimmed.startsWith("http://", ignoreCase = true))) {
+                return@withContext Result.failure(IllegalArgumentException("Enter a valid http(s):// grounding server URL."))
+            }
+            val startMs = System.currentTimeMillis()
+            try {
+                // Lightweight JSON probe; accepts 2xx/400/405/422 as reachable server response vs network/auth failure
+                val payload = JSONObject().apply {
+                    put("ping", true)
+                    put("target", "healthcheck")
+                }.toString().toRequestBody(JSON_TYPE)
+
+                val reqBuilder = Request.Builder()
+                    .url(trimmed)
+                    .post(payload)
+                if (!bearerToken.isNullOrBlank()) {
+                    reqBuilder.header("Authorization", "Bearer ${bearerToken.trim()}")
+                }
+                okHttpClient.newCall(reqBuilder.build()).execute().use { response ->
+                    val elapsed = System.currentTimeMillis() - startMs
+                    when {
+                        response.isSuccessful -> Result.success("Connected (HTTP ${response.code}, ${elapsed}ms)")
+                        response.code in listOf(401, 403) ->
+                            Result.failure(IllegalStateException("Auth failed (HTTP ${response.code}) — check bearer token."))
+                        response.code == 400 || response.code == 405 || response.code == 422 ->
+                            Result.success("Server reachable (HTTP ${response.code}, ${elapsed}ms)")
+                        else ->
+                            Result.failure(IllegalStateException("Server returned HTTP ${response.code}"))
+                    }
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
     }
 
     override suspend fun locateTarget(
