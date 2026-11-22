@@ -11,38 +11,18 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.BatteryAlert
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.SmartToy
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,789 +32,260 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.ai.MahiMood
-import com.example.api.AiProvider
-import com.example.api.ConnectionStatus
-import com.example.audio.MicTestSnapshot
-import com.example.audio.WakeEngineStatus
-import com.example.audio.WakeEnrollmentState
+import androidx.compose.ui.window.Dialog
+import com.example.audio.MahiSpeechSynthesizer
 import com.example.audio.WakeModelState
 import com.example.audio.WakeModelStatus
+import com.example.memory.UserMemoryProfile
 import com.example.preferences.AppLanguage
-import com.example.preferences.AppThemeMode
+import com.example.preferences.MahiUserPreferences
+import com.example.preferences.MahiVoiceGender
 import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.CyberEmerald
 import com.example.ui.theme.NeonMagenta
 import com.example.ui.theme.NeonViolet
-import com.example.ui.theme.WarningAmber
+import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsModal(
-    currentMood: MahiMood,
-    currentLanguage: AppLanguage = AppLanguage.ENGLISH,
-    currentThemeMode: AppThemeMode = AppThemeMode.DARK,
-    isContinuousMode: Boolean,
-    isPushToTalkMode: Boolean = false,
-    isAutoLanguageDetection: Boolean = true,
-    showSubtitles: Boolean,
-    voicePitch: Float,
-    voiceSpeed: Float,
-    activeProvider: AiProvider = AiProvider.GEMINI,
-    activeModel: String = activeProvider.defaultModels.first(),
-    connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
-    wakeDetectionEnabled: Boolean = false,
-    wakeEngineStatus: WakeEngineStatus = WakeEngineStatus.OFF,
-    wakeErrorMessage: String? = null,
-    wakeEnrollmentState: WakeEnrollmentState = WakeEnrollmentState(),
-    wakeModelState: WakeModelState = WakeModelState(),
-    micTestSnapshot: MicTestSnapshot = MicTestSnapshot(),
-    autopilotEnabled: Boolean = false,
-    learnedLabelCount: Int = 0,
-    onOpenApiSettings: () -> Unit = {},
-    onOpenSmartControl: () -> Unit = {},
-    onOpenHistoryMemory: () -> Unit = {},
-    onToggleAutopilot: (Boolean) -> Unit = {},
-    onClearLearnedLabels: () -> Unit = {},
-    onToggleWakeDetection: (Boolean) -> Unit = {},
-    onRecordWakeSample: () -> Unit = {},
-    onResetWakeEnrollment: () -> Unit = {},
-    onDownloadWakeModel: () -> Unit = {},
-    onDeleteWakeModel: () -> Unit = {},
-    onToggleMicTest: () -> Unit = {},
-    onOpenBatteryUnrestrictedSettings: () -> Unit = {},
-    onLanguageSelected: (AppLanguage) -> Unit = {},
-    onThemeSelected: (AppThemeMode) -> Unit = {},
-    onMoodSelected: (MahiMood) -> Unit,
-    onContinuousToggle: () -> Unit,
-    onPushToTalkToggle: (Boolean) -> Unit = {},
-    onAutoLanguageToggle: (Boolean) -> Unit = {},
-    onSubtitlesToggle: () -> Unit,
-    onPitchChanged: (Float) -> Unit,
-    onSpeedChanged: (Float) -> Unit,
-    onTestVoice: () -> Unit,
+    prefs: MahiUserPreferences,
+    wakeModelState: WakeModelState,
+    learnedLabelCount: Int,
+    memoryProfile: UserMemoryProfile,
+    onLanguageChange: (AppLanguage) -> Unit,
+    onVoiceGenderChange: (MahiVoiceGender) -> Unit,
+    onVoicePitchChange: (Float) -> Unit,
+    onVoiceSpeedChange: (Float) -> Unit,
+    onTtsClarityChange: (Boolean) -> Unit,
+    onTestVoiceSpeed: () -> Unit,
+    onContinuousModeChange: (Boolean) -> Unit,
+    onShowSubtitlesChange: (Boolean) -> Unit,
+    onDarkThemeChange: (Boolean) -> Unit,
+    onAutopilotChange: (Boolean) -> Unit,
+    onWakeDetectionChange: (Boolean) -> Unit,
+    onPreferGeminiLiveChange: (Boolean) -> Unit,
+    onDownloadWakeModel: () -> Unit,
+    onClearLearnedLabels: () -> Unit,
+    onMemoryConsentChange: (Boolean) -> Unit,
+    onForgetMemory: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val colors = MaterialTheme.colorScheme
+    val effective = MahiSpeechSynthesizer.computeEffectiveTtsParams(
+        requestedSpeed = prefs.voiceSpeed,
+        requestedPitch = prefs.voicePitch,
+        clarityCompensation = prefs.ttsClarityCompensation
+    )
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = colors.surface,
-        dragHandle = null
-    ) {
-        Column(
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = colors.surface,
+            tonalElevation = 8.dp,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(24.dp)
-                .verticalScroll(rememberScrollState())
+                .border(1.dp, CyberCyan.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
+                .testTag("settings_modal")
         ) {
-            // Header
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        text = "MAHI PREFERENCES",
-                        color = CyberCyan,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Black,
-                        letterSpacing = 1.sp
-                    )
-                    Text(
-                        text = "Voice, Language & Appearance",
-                        color = colors.onSurface,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                IconButton(onClick = onDismiss) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Close",
-                        tint = colors.onSurfaceVariant
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // API Keys & Providers Navigation Card
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(colors.surfaceVariant)
-                    .border(1.dp, CyberCyan.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
-                    .clickable {
-                        onDismiss()
-                        onOpenApiSettings()
-                    }
-                    .padding(14.dp)
-                    .testTag("settings_api_providers_button"),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(NeonMagenta.copy(alpha = 0.16f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.VpnKey,
-                            contentDescription = "API Keys & Providers",
-                            tint = NeonMagenta,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = "API Keys & Providers",
-                            color = colors.onSurface,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "${activeProvider.shortName} • $activeModel",
-                            color = colors.onSurfaceVariant,
-                            fontSize = 11.sp
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        ConnectionStatusPill(status = connectionStatus)
-                    }
-                }
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = "Open API Keys & Providers",
-                    tint = CyberCyan
-                )
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Smart Smartphone Control Card
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(colors.surfaceVariant)
-                    .border(1.dp, NeonViolet.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
-                    .clickable {
-                        onDismiss()
-                        onOpenSmartControl()
-                    }
-                    .padding(14.dp)
-                    .testTag("settings_smart_control_button"),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Default.Tune, contentDescription = null, tint = CyberCyan, modifier = Modifier.size(22.dp))
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text("Smart Smartphone Control", color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        Text("Battery, Storage, Wi-Fi, 5-Stream Volume, Quick Settings & Permissions", color = colors.onSurfaceVariant, fontSize = 11.sp)
-                    }
-                }
-                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Open Smart Control", tint = CyberCyan)
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // History & Long-Term Memory Card
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(colors.surfaceVariant)
-                    .border(1.dp, NeonMagenta.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
-                    .clickable {
-                        onDismiss()
-                        onOpenHistoryMemory()
-                    }
-                    .padding(14.dp)
-                    .testTag("settings_memory_history_button"),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Default.History, contentDescription = null, tint = NeonMagenta, modifier = Modifier.size(22.dp))
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text("Memory & Conversation History", color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        Text("Browse past chats, consent-gated personal memory & Forget Everything", color = colors.onSurfaceVariant, fontSize = 11.sp)
-                    }
-                }
-                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Open Memory & History", tint = NeonMagenta)
-            }
-
-            Spacer(modifier = Modifier.height(18.dp))
-
-            // Language Selector (English, Roman Urdu, Urdu)
-            Text(
-                text = "Assistant & Vision Language",
-                color = colors.onSurface,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                AppLanguage.entries.forEach { lang ->
-                    val selected = lang == currentLanguage
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (selected) NeonMagenta else colors.surfaceVariant)
-                            .border(
-                                1.dp,
-                                if (selected) NeonMagenta else colors.outline,
-                                RoundedCornerShape(12.dp)
-                            )
-                            .clickable { onLanguageSelected(lang) }
-                            .padding(vertical = 10.dp)
-                            .testTag("settings_lang_${lang.id}"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = lang.displayName,
-                            color = if (selected) Color.White else colors.onSurface,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Theme Mode Selector (Dark, Light, System)
-            Text(
-                text = "Theme Appearance",
-                color = colors.onSurface,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                AppThemeMode.entries.forEach { mode ->
-                    val selected = mode == currentThemeMode
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (selected) NeonViolet else colors.surfaceVariant)
-                            .border(
-                                1.dp,
-                                if (selected) NeonViolet else colors.outline,
-                                RoundedCornerShape(12.dp)
-                            )
-                            .clickable { onThemeSelected(mode) }
-                            .padding(vertical = 10.dp)
-                            .testTag("settings_theme_${mode.id}"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = mode.displayName,
-                            color = if (selected) Color.White else colors.onSurface,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Mood Selector
-            Text(
-                text = "Persona Mood",
-                color = colors.onSurface,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                MahiMood.values().forEach { mood ->
-                    val isSelected = mood == currentMood
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(if (isSelected) NeonMagenta.copy(alpha = 0.14f) else colors.surfaceVariant)
-                            .border(
-                                width = 1.dp,
-                                color = if (isSelected) NeonMagenta else colors.outline,
-                                shape = RoundedCornerShape(14.dp)
-                            )
-                            .clickable { onMoodSelected(mood) }
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(text = mood.emoji, fontSize = 20.sp)
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column {
-                                Text(
-                                    text = mood.displayName,
-                                    color = if (isSelected) NeonMagenta else colors.onSurface,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = mood.description,
-                                    color = colors.onSurfaceVariant,
-                                    fontSize = 11.sp
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // Continuous Voice Mode Switch
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(colors.surfaceVariant)
-                    .padding(14.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Continuous Voice Loop",
-                        color = colors.onSurface,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "Keep mic active after Mahi finishes speaking",
-                        color = colors.onSurfaceVariant,
-                        fontSize = 11.sp
-                    )
-                }
-                Switch(
-                    checked = isContinuousMode,
-                    onCheckedChange = { onContinuousToggle() },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
-                        checkedTrackColor = NeonMagenta,
-                        uncheckedTrackColor = colors.outline
-                    ),
-                    modifier = Modifier.testTag("continuous_mode_switch")
-                )
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Subtitles Toggle
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(colors.surfaceVariant)
-                    .padding(14.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Live Holographic Subtitles",
-                        color = colors.onSurface,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "Show speech captions in real-time",
-                        color = colors.onSurfaceVariant,
-                        fontSize = 11.sp
-                    )
-                }
-                Switch(
-                    checked = showSubtitles,
-                    onCheckedChange = { onSubtitlesToggle() },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
-                        checkedTrackColor = CyberCyan,
-                        uncheckedTrackColor = colors.outline
-                    )
-                )
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(colors.surfaceVariant)
-                    .padding(14.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Push-to-Talk Mode",
-                        color = colors.onSurface,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "Hold to talk instead of hands-free continuous capture",
-                        color = colors.onSurfaceVariant,
-                        fontSize = 11.sp
-                    )
-                }
-                Switch(
-                    checked = isPushToTalkMode,
-                    onCheckedChange = onPushToTalkToggle,
-                    modifier = Modifier.testTag("push_to_talk_switch")
-                )
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(colors.surfaceVariant)
-                    .padding(14.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Auto Language Detection",
-                        color = colors.onSurface,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "Match English, Roman Urdu, or Urdu automatically",
-                        color = colors.onSurfaceVariant,
-                        fontSize = 11.sp
-                    )
-                }
-                Switch(
-                    checked = isAutoLanguageDetection,
-                    onCheckedChange = onAutoLanguageToggle,
-                    modifier = Modifier.testTag("auto_language_switch")
-                )
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Voice Pitch Slider
-            Text(
-                text = "Voice Pitch: ${String.format("%.2f", voicePitch)}x",
-                color = colors.onSurface,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-            Slider(
-                value = voicePitch,
-                onValueChange = onPitchChanged,
-                valueRange = 0.85f..1.45f,
-                colors = SliderDefaults.colors(
-                    thumbColor = NeonMagenta,
-                    activeTrackColor = NeonMagenta,
-                    inactiveTrackColor = colors.outline
-                )
-            )
-
-            // Voice Speed Slider
-            Text(
-                text = "Speech Cadence: ${String.format("%.2f", voiceSpeed)}x",
-                color = colors.onSurface,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-            Slider(
-                value = voiceSpeed,
-                onValueChange = onSpeedChanged,
-                valueRange = 0.85f..1.35f,
-                colors = SliderDefaults.colors(
-                    thumbColor = CyberCyan,
-                    activeTrackColor = CyberCyan,
-                    inactiveTrackColor = colors.outline
-                )
-            )
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // Autopilot Cross-App Screen Control + Learned UI Labels
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(colors.surfaceVariant)
-                    .border(1.dp, NeonViolet.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
-                    .padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                    .padding(16.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.SmartToy,
-                            contentDescription = null,
-                            tint = NeonViolet,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Column {
-                            Text(
-                                text = "Allow Autopilot",
-                                color = colors.onSurface,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = if (autopilotEnabled) {
-                                    "ON — Mahi can control apps step-by-step"
-                                } else {
-                                    "OFF by default for safety"
-                                },
-                                color = if (autopilotEnabled) CyberEmerald else colors.onSurfaceVariant,
-                                fontSize = 11.sp
-                            )
-                        }
-                    }
-                    Switch(
-                        checked = autopilotEnabled,
-                        onCheckedChange = onToggleAutopilot,
-                        colors = SwitchDefaults.colors(checkedTrackColor = NeonViolet),
-                        modifier = Modifier.testTag("settings_autopilot_switch")
-                    )
+                    Text("Mahi Voice & App Settings", color = CyberCyan, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    TextButton(onClick = onDismiss) { Text("Done") }
                 }
 
-                Text(
-                    text = "Lets Mahi inspect active app UI elements via Accessibility and tap, type, or scroll step-by-step. Stops immediately on Stop, passwords, CAPTCHAs, permissions, or paywalls.",
-                    color = colors.onSurfaceVariant,
-                    fontSize = 11.sp
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                // TTS Speech Speed Section with Clarity Compensation
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(colors.surfaceVariant)
+                        .border(1.dp, NeonMagenta.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text(
-                        text = "Learned app labels: $learnedLabelCount",
-                        color = colors.onSurface,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedButton(
-                        onClick = onClearLearnedLabels,
-                        enabled = learnedLabelCount > 0,
-                        modifier = Modifier.testTag("settings_clear_learned_labels_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.DeleteOutline,
-                            contentDescription = "Clear learned labels",
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Clear ($learnedLabelCount)", fontSize = 11.sp)
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // Wake Up Detection ("Hey Mahi") + 5-Sample Enrollment + Offline Model + Mic Test
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(colors.surfaceVariant)
-                    .border(1.dp, CyberCyan.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
-                    .padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Wake Up Detection", color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        Text(
-                            text = "Hands-free \"Hey Mahi\" offline detector (${wakeEngineStatus.name})",
-                            color = if (wakeDetectionEnabled) CyberEmerald else colors.onSurfaceVariant,
-                            fontSize = 11.sp
-                        )
-                    }
-                    Switch(
-                        checked = wakeDetectionEnabled,
-                        onCheckedChange = onToggleWakeDetection,
-                        colors = SwitchDefaults.colors(checkedTrackColor = CyberCyan),
-                        modifier = Modifier.testTag("wake_detection_switch")
-                    )
-                }
-
-                if (!wakeErrorMessage.isNullOrBlank()) {
-                    Text(text = wakeErrorMessage, color = WarningAmber, fontSize = 11.sp)
-                }
-
-                // 5-Sample Enrollment Progress
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        text = "Voice Calibration (Phrase Tuning): ${wakeEnrollmentState.completedCount}/${wakeEnrollmentState.requiredSamples} samples",
-                        color = colors.onSurface,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    LinearProgressIndicator(
-                        progress = { wakeEnrollmentState.completedCount.toFloat() / wakeEnrollmentState.requiredSamples.toFloat() },
-                        color = NeonMagenta,
-                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp))
-                    )
-                    Text(text = wakeEnrollmentState.lastFeedback, color = colors.onSurfaceVariant, fontSize = 11.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = onRecordWakeSample,
-                            enabled = !wakeEnrollmentState.isRecordingSample && !wakeEnrollmentState.isComplete,
-                            colors = ButtonDefaults.buttonColors(containerColor = NeonMagenta),
-                            modifier = Modifier.weight(1f).testTag("wake_record_sample_button")
-                        ) {
-                            Text(
-                                text = if (wakeEnrollmentState.isRecordingSample) "Listening…" else if (wakeEnrollmentState.isComplete) "Calibrated" else "Say \"Hey Mahi\" (${wakeEnrollmentState.completedCount + 1}/5)",
-                                fontSize = 11.sp
-                            )
-                        }
-                        OutlinedButton(onClick = onResetWakeEnrollment) {
-                            Text("Retry / Reset", fontSize = 11.sp)
-                        }
-                    }
-                }
-
-                // Offline Vosk Model Download / Status
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        text = "Offline Vosk Model: ${wakeModelState.status.name} (${wakeModelState.sizeLabel})",
-                        color = colors.onSurface,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    if (wakeModelState.status == WakeModelStatus.DOWNLOADING || wakeModelState.status == WakeModelStatus.EXTRACTING) {
-                        LinearProgressIndicator(
-                            progress = { wakeModelState.progressPercent / 100f },
-                            color = CyberCyan,
-                            modifier = Modifier.fillMaxWidth().height(6.dp)
-                        )
-                    }
-                    Text(text = wakeModelState.message, color = colors.onSurfaceVariant, fontSize = 11.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (wakeModelState.status != WakeModelStatus.READY) {
-                            OutlinedButton(
-                                onClick = onDownloadWakeModel,
-                                enabled = wakeModelState.status != WakeModelStatus.DOWNLOADING && wakeModelState.status != WakeModelStatus.EXTRACTING,
-                                modifier = Modifier.weight(1f).testTag("wake_download_model_button")
-                            ) {
-                                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(15.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(if (wakeModelState.status == WakeModelStatus.ERROR) "Retry Download" else "Download Model", fontSize = 11.sp)
-                            }
-                        } else {
-                            OutlinedButton(onClick = onDeleteWakeModel) {
-                                Text("Remove Offline Model", fontSize = 11.sp)
-                            }
-                        }
-                    }
-                }
-
-                // Real 16kHz Microphone Test
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Mic Test (${String.format("%.0f", micTestSnapshot.dbLevel)} dB)",
+                            text = "TTS Speech Speed: ${String.format(Locale.US, "%.2fx", prefs.voiceSpeed)}",
                             color = colors.onSurface,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.testTag("tts_speed_label")
                         )
-                        OutlinedButton(onClick = onToggleMicTest, modifier = Modifier.testTag("settings_mic_test_button")) {
-                            Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(15.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(if (micTestSnapshot.isTesting) "Stop Test" else "Test Mic", fontSize = 11.sp)
+                        Text(
+                            text = "Eff Pitch ${String.format(Locale.US, "%.2f", effective.pitch)}",
+                            color = CyberCyan,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Slider(
+                        value = prefs.voiceSpeed,
+                        onValueChange = { onVoiceSpeedChange((it * 20f).toInt() / 20f) },
+                        valueRange = MahiSpeechSynthesizer.MIN_SPEED..MahiSpeechSynthesizer.MAX_SPEED,
+                        steps = 29,
+                        modifier = Modifier.testTag("tts_speed_slider")
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        listOf(0.75f to "0.75x", 1.0f to "1.0x", 1.35f to "1.35x", 1.75f to "1.75x", 2.0f to "2.0x").forEach { (spd, lbl) ->
+                            val selected = kotlin.math.abs(prefs.voiceSpeed - spd) < 0.04f
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) NeonMagenta else colors.surface)
+                                    .clickable { onVoiceSpeedChange(spd) }
+                                    .padding(vertical = 6.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(lbl, color = if (selected) Color.White else colors.onSurface, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
-                    LinearProgressIndicator(
-                        progress = { micTestSnapshot.rmsLevel.coerceIn(0f, 1f) },
-                        color = if (micTestSnapshot.isVoiceActive) CyberEmerald else CyberCyan,
-                        modifier = Modifier.fillMaxWidth().height(6.dp)
+                    SettingsToggleRow(
+                        title = "High-Speed Clarity Balance",
+                        subtitle = "Compensates pitch above 1.30x so fast speech remains natural & crisp",
+                        checked = prefs.ttsClarityCompensation,
+                        tag = "tts_clarity_switch",
+                        onCheckedChange = onTtsClarityChange
                     )
-                    Text(text = micTestSnapshot.statusText, color = colors.onSurfaceVariant, fontSize = 11.sp)
+                    Button(
+                        onClick = onTestVoiceSpeed,
+                        colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
+                        modifier = Modifier.fillMaxWidth().testTag("tts_test_voice_button")
+                    ) {
+                        Text("Test Speech Speed Now", color = Color(0xFF070B16), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
                 }
 
-                // Motorola / Android 14+ Unrestricted Battery Guidance
-                OutlinedButton(
-                    onClick = onOpenBatteryUnrestrictedSettings,
-                    modifier = Modifier.fillMaxWidth()
+                // Pitch Slider
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(colors.surfaceVariant)
+                        .padding(12.dp)
                 ) {
-                    Icon(Icons.Default.BatteryAlert, contentDescription = null, tint = WarningAmber, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Set Unrestricted Battery (Motorola / Android 14+)", fontSize = 11.sp)
+                    Text(
+                        text = "Base Voice Pitch: ${String.format(Locale.US, "%.2f", prefs.voicePitch)}",
+                        color = colors.onSurface,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Slider(
+                        value = prefs.voicePitch,
+                        onValueChange = onVoicePitchChange,
+                        valueRange = 0.65f..1.5f
+                    )
                 }
+
+                // Voice Gender
+                Text("Voice Persona", color = CyberCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    MahiVoiceGender.entries.forEach { g ->
+                        val sel = g == prefs.voiceGender
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (sel) NeonViolet else colors.surfaceVariant)
+                                .clickable { onVoiceGenderChange(g) }
+                                .padding(10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(g.displayName, color = if (sel) Color.White else colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+
+                // Language Selector
+                Text("Language", color = CyberCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    AppLanguage.entries.chunked(2).forEach { pair ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            pair.forEach { lang ->
+                                val sel = lang == prefs.language
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (sel) CyberCyan else colors.surfaceVariant)
+                                        .clickable { onLanguageChange(lang) }
+                                        .padding(10.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(lang.displayName, color = if (sel) Color(0xFF070B16) else colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Toggles
+                SettingsToggleRow("Gemini Live Bidirectional Voice", "Use native WebSocket voice when Gemini key is set", prefs.preferGeminiLiveVoice, "prefer_live_switch", onPreferGeminiLiveChange)
+                SettingsToggleRow("Continuous Listening Mode", "Automatically keep voice loop ready", prefs.isContinuousMode, "continuous_mode_switch", onContinuousModeChange)
+                SettingsToggleRow("Live Subtitles Overlay", "Display live user & Mahi transcript banner", prefs.showSubtitles, "subtitles_switch", onShowSubtitlesChange)
+                SettingsToggleRow("Dark Cyber Glow Theme", "Switch between Midnight Dark and Clean Light", prefs.darkTheme, "dark_theme_switch", onDarkThemeChange)
+                SettingsToggleRow("Allow Screen Autopilot (Safe Default = OFF)", "Must be ON before Mahi can tap external apps", prefs.autopilotEnabled, "autopilot_switch", onAutopilotChange)
+                SettingsToggleRow("Wake Up Detection (\"Hey Mahi\")", "Opt-in background trigger with single-mic arbitration", prefs.wakeDetectionEnabled, "wake_detection_switch", onWakeDetectionChange)
+
+                if (wakeModelState.status != WakeModelStatus.READY) {
+                    OutlinedButton(onClick = onDownloadWakeModel, modifier = Modifier.fillMaxWidth()) {
+                        Text("Download Offline Wake Model (${wakeModelState.sizeLabel}) • ${wakeModelState.progressPercent}%", fontSize = 11.sp)
+                    }
+                } else {
+                    Text("Offline Wake Model Ready", color = CyberEmerald, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                }
+
+                // Memory & Labels
+                SettingsToggleRow("Consented User Memory (${memoryProfile.facts.size} facts)", "Inject preferred facts into AI context only when ON", prefs.memoryConsentGranted, "memory_consent_switch", onMemoryConsentChange)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(onClick = onClearLearnedLabels, modifier = Modifier.weight(1f)) {
+                        Text("Clear Labels ($learnedLabelCount)", fontSize = 11.sp)
+                    }
+                    OutlinedButton(onClick = onForgetMemory, modifier = Modifier.weight(1f)) {
+                        Text("Forget Memory", fontSize = 11.sp, color = Color(0xFFEF4444))
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
             }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Test Voice Button
-            Button(
-                onClick = onTestVoice,
-                colors = ButtonDefaults.buttonColors(containerColor = NeonViolet),
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.PlayArrow,
-                    contentDescription = "Test Voice",
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Test Mahi's Voice", fontWeight = FontWeight.Bold)
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
         }
+    }
+}
+
+@Composable
+private fun SettingsToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    tag: String,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(colors.surfaceVariant)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(title, color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Text(subtitle, color = colors.onSurfaceVariant, fontSize = 10.sp)
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange, modifier = Modifier.testTag(tag))
     }
 }

@@ -2,18 +2,15 @@ package com.example.ai
 
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.AudioTrack
+import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
 import android.util.Base64
-import android.util.Log
-import com.example.api.ApiErrorCategory
-import com.example.api.isGeminiLiveAudioModel
-import com.example.tools.ToolAction
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,1241 +22,492 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
-import kotlin.math.abs
-import kotlin.math.min
-import kotlin.math.sin
-import kotlin.math.sqrt
 
-data class GeminiLiveError(
-    val category: ApiErrorCategory,
-    val message: String
+enum class GeminiLiveStatus(val label: String) {
+    IDLE("Disconnected"),
+    CONNECTING("Connecting Gemini Live…"),
+    LISTENING("Gemini Live Listening"),
+    THINKING("Gemini Live Thinking…"),
+    SPEAKING("Gemini Live Speaking"),
+    RECONNECTING("Reconnecting Gemini Live…"),
+    BLOCKED("Blocked / Key or Network Required"),
+    ERROR("Connection Error")
+}
+
+data class LiveToolCallRequest(
+    val id: String,
+    val name: String,
+    val params: Map<String, String>
 )
 
-enum class GeminiLiveConnectionPhase {
-    DISCONNECTED,
-    CONNECTING,
-    CONNECTED_LISTENING,
-    SPEAKING,
-    RECONNECTING,
-    ERROR
-}
-
-interface GeminiLiveCallbacks {
-    fun onSetupComplete()
-    fun onUserTranscript(text: String)
-    fun onAssistantTranscript(text: String)
-    fun onAssistantSpeakingChanged(isSpeaking: Boolean)
-    fun onToolCall(id: String, action: ToolAction)
-    fun onInterrupted()
-    fun onReconnecting(attempt: Int, maxAttempts: Int, reason: String) {}
-    fun onError(error: GeminiLiveError)
-    fun onDisconnected()
-}
-
-/**
- * Persistent full-duplex Gemini Multimodal Live WebSocket client (Audio-to-Audio ONLY):
- * - Awaits setupComplete strictly before sending queued 16kHz PCM audio chunks
- * - Decodes & plays every 24kHz PCM audio chunk sequentially via a persistent Channel -> AudioTrack worker
- * - Prevents premature turnComplete playback truncation by letting queued audio finish draining
- * - Supports immediate interruption / barge-in without stopping continuous mic streaming
- * - Prevents duplicate sessions via monotonic sessionGeneration IDs
- * - Auto-reconnects on transient drops with bounded exponential backoff + conversation context preservation
- * - Never exposes API keys in logs and never silently downgrades to text-only mode
- */
 class GeminiLiveClient(
-    private val okHttpClient: OkHttpClient = defaultWebSocketClient()
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .build()
 ) {
     companion object {
-        private const val TAG = "GeminiLiveClient"
-        private const val LIVE_WS_ENDPOINT =
+        private const val LIVE_WS_URL =
             "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
-        private const val OUTPUT_SAMPLE_RATE = 24000
-        const val MAX_RECONNECT_ATTEMPTS = 3
+        const val INPUT_SAMPLE_RATE = 16_000
+        const val OUTPUT_SAMPLE_RATE = 24_000
 
-        fun defaultWebSocketClient(): OkHttpClient = OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS)
-            .pingInterval(20, TimeUnit.SECONDS)
-            .build()
+        private fun prop(type: String, description: String): JSONObject =
+            JSONObject().put("type", type).put("description", description)
 
-        fun buildWebSocketRequest(apiKey: String, baseWsUrl: String = LIVE_WS_ENDPOINT): Request {
-            return Request.Builder()
-                .url(baseWsUrl)
-                .header("x-goog-api-key", apiKey.trim())
-                .build()
-        }
-
-        fun buildSetupMessage(
-            model: String,
-            systemPrompt: String,
-            voiceName: String = "Aoede"
-        ): String {
-            val cleanModel = if (model.startsWith("models/")) model else "models/$model"
-            return JSONObject().apply {
-                put("setup", JSONObject().apply {
-                    put("model", cleanModel)
-                    put("generationConfig", JSONObject().apply {
-                        put("responseModalities", JSONArray().apply { put("AUDIO") })
-                        put("speechConfig", JSONObject().apply {
-                            put("voiceConfig", JSONObject().apply {
-                                put("prebuiltVoiceConfig", JSONObject().apply {
-                                    put("voiceName", voiceName)
-                                })
-                            })
-                        })
-                    })
-                    put("systemInstruction", JSONObject().apply {
-                        put("parts", JSONArray().apply {
-                            put(JSONObject().apply { put("text", systemPrompt) })
-                        })
-                    })
-                    put("inputAudioTranscription", JSONObject())
-                    put("outputAudioTranscription", JSONObject())
-                    put("tools", JSONArray().apply {
-                        put(JSONObject().apply {
-                            put("functionDeclarations", buildToolDeclarations())
-                        })
-                    })
+        private fun fnDecl(
+            name: String,
+            description: String,
+            properties: Map<String, JSONObject>,
+            required: List<String> = emptyList()
+        ): JSONObject = JSONObject().apply {
+            put("name", name)
+            put("description", description)
+            put("parameters", JSONObject().apply {
+                put("type", "OBJECT")
+                put("properties", JSONObject().apply {
+                    properties.forEach { (k, v) -> put(k, v) }
                 })
-            }.toString()
+                if (required.isNotEmpty()) {
+                    put("required", JSONArray(required))
+                }
+            })
         }
 
         fun buildToolDeclarations(): JSONArray = JSONArray().apply {
-            put(JSONObject().apply {
-                put("name", "openApp")
-                put("description", "Launch any installed Android app on the phone such as Facebook, TikTok, YouTube, Google, Chrome, WhatsApp, Instagram, Spotify, Settings, or Camera.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("appName", JSONObject().apply { put("type", "STRING") })
-                        put("url", JSONObject().apply { put("type", "STRING") })
-                        put("followUpGesture", JSONObject().apply { put("type", "STRING") })
-                    })
-                    put("required", JSONArray().apply { put("appName") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "openCamera")
-                put("description", "Open the Camera Studio with live CameraX preview (back or front lens).")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("frontOrBack", JSONObject().apply { put("type", "STRING") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "switchCamera")
-                put("description", "Switch active camera between front selfie lens and back lens.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("frontOrBack", JSONObject().apply { put("type", "STRING") })
-                    })
-                    put("required", JSONArray().apply { put("frontOrBack") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "capturePhoto")
-                put("description", "Capture a photo or 3-second countdown selfie and save it to MediaStore Gallery.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("isSelfie", JSONObject().apply { put("type", "BOOLEAN") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "startVideoRecording")
-                put("description", "Start visible video recording with live timer using CameraX.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject())
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "stopVideoRecording")
-                put("description", "Stop the active CameraX video recording and save the MP4 to MediaStore Movies.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject())
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "setFlash")
-                put("description", "Enable or disable camera flash or torch.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("enabled", JSONObject().apply { put("type", "BOOLEAN") })
-                    })
-                    put("required", JSONArray().apply { put("enabled") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "setZoom")
-                put("description", "Adjust camera zoom ratio level (e.g. 1.0, 1.5, 2.0) or step direction ('in' / 'out').")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("level", JSONObject().apply { put("type", "STRING") })
-                    })
-                    put("required", JSONArray().apply { put("level") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "openGoogle")
-                put("description", "Open the Google Search app or Google homepage.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject())
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "googleSearch")
-                put("description", "Search Google for a query using the Google app or browser with proper URL encoding and show summary options.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("query", JSONObject().apply { put("type", "STRING") })
-                    })
-                    put("required", JSONArray().apply { put("query") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "youtubeSearch")
-                put("description", "Search YouTube natively for videos matching the query.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("query", JSONObject().apply { put("type", "STRING") })
-                    })
-                    put("required", JSONArray().apply { put("query") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "openWebsite")
-                put("description", "Open a website URL in Chrome or the default browser on the user's phone.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("url", JSONObject().apply { put("type", "STRING") })
-                        put("title", JSONObject().apply { put("type", "STRING") })
-                    })
-                    put("required", JSONArray().apply { put("url") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "verifyAppLaunch")
-                put("description", "Verify whether a specific Android package name is installed, enabled, and launchable.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("packageName", JSONObject().apply { put("type", "STRING") })
-                    })
-                    put("required", JSONArray().apply { put("packageName") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "stopAutomation")
-                put("description", "Immediately stop all running screen gestures, scrolling, and autonomous automation.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject())
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "screenGesture")
-                put("description", "Control screen gestures: SWIPE_UP, SWIPE_DOWN, SWIPE_LEFT, SWIPE_RIGHT, FAST_SCROLL_DOWN, FAST_SCROLL_UP, SCROLL_TOP, SCROLL_BOTTOM, CONTINUOUS_SCROLL_DOWN, CONTINUOUS_SCROLL_UP, TAP_TEXT, DOUBLE_TAP, LONG_PRESS, STOP. Optionally specify targetIndex, targetText, or startX/startY/endX/endY.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("action", JSONObject().apply { put("type", "STRING") })
-                        put("targetText", JSONObject().apply { put("type", "STRING") })
-                        put("targetIndex", JSONObject().apply { put("type", "INTEGER") })
-                        put("startX", JSONObject().apply { put("type", "NUMBER") })
-                        put("startY", JSONObject().apply { put("type", "NUMBER") })
-                        put("endX", JSONObject().apply { put("type", "NUMBER") })
-                        put("endY", JSONObject().apply { put("type", "NUMBER") })
-                    })
-                    put("required", JSONArray().apply { put("action") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "searchWeb")
-                put("description", "General web or YouTube search fallback.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("query", JSONObject().apply { put("type", "STRING") })
-                        put("target", JSONObject().apply { put("type", "STRING") })
-                    })
-                    put("required", JSONArray().apply { put("query") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "setTimer")
-                put("description", "Set a countdown timer in minutes.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("minutes", JSONObject().apply { put("type", "INTEGER") })
-                        put("label", JSONObject().apply { put("type", "STRING") })
-                    })
-                    put("required", JSONArray().apply { put("minutes") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "toggleFlashlight")
-                put("description", "Turn the phone flashlight on or off.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("state", JSONObject().apply { put("type", "STRING") })
-                    })
-                    put("required", JSONArray().apply { put("state") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "changeMood")
-                put("description", "Change Mahi's persona mood: SASSY, FLIRTY, PLAYFUL, SAVAGE, or SWEET.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("mood", JSONObject().apply { put("type", "STRING") })
-                    })
-                    put("required", JSONArray().apply { put("mood") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "readNotifications")
-                put("description", "Read active captured device notifications including WhatsApp messages.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("filter", JSONObject().apply { put("type", "STRING") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "openSettings")
-                put("description", "Open Android system settings screen such as wifi, bluetooth, display, accessibility, or notifications.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("category", JSONObject().apply { put("type", "STRING") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "getBatteryInfo")
-                put("description", "Read real Android battery percentage, charging status, temperature, voltage, and health.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject())
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "getStorageInfo")
-                put("description", "Read real internal storage free, used, and total space via StatFs.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject())
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "getNetworkInfo")
-                put("description", "Read active Wi-Fi or mobile network connectivity status.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject())
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "getDeviceInfo")
-                put("description", "Read device model, Android OS version, SDK level, available RAM, and uptime.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject())
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "setVolume")
-                put("description", "Adjust or mute Android volume for media, ringtone, notification, alarm, or call stream.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("stream", JSONObject().apply { put("type", "STRING") })
-                        put("percent", JSONObject().apply { put("type", "INTEGER") })
-                        put("mute", JSONObject().apply { put("type", "BOOLEAN") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "openQuickSettings")
-                put("description", "Expand Android Quick Settings, Notification shade, or open Wi-Fi, Bluetooth, Mobile Data, Airplane Mode, or NFC panels.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("panel", JSONObject().apply { put("type", "STRING") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "readScreen")
-                put("description", "Read the currently visible screen elements (numbered list with widget types, labels, clickable/editable/scrollable flags, and coordinates) via Accessibility. Always call this before answering what is on screen or interacting with an app.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("question", JSONObject().apply { put("type", "STRING") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "tapElement")
-                put("description", "Tap/click a visible UI element on the screen by 1-based element index from readScreen, text/contentDescription query, resource viewId, or x/y screen coordinates.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("index", JSONObject().apply { put("type", "INTEGER") })
-                        put("query", JSONObject().apply { put("type", "STRING") })
-                        put("viewId", JSONObject().apply { put("type", "STRING") })
-                        put("x", JSONObject().apply { put("type", "NUMBER") })
-                        put("y", JSONObject().apply { put("type", "NUMBER") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "typeText")
-                put("description", "Type text into a visible editable field on screen (by index, field query, or focused input), optionally appending, clearing first, or submitting (Enter/Search/Send). Refuses password fields.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("index", JSONObject().apply { put("type", "INTEGER") })
-                        put("query", JSONObject().apply { put("type", "STRING") })
-                        put("text", JSONObject().apply { put("type", "STRING") })
-                        put("append", JSONObject().apply { put("type", "BOOLEAN") })
-                        put("clearFirst", JSONObject().apply { put("type", "BOOLEAN") })
-                        put("submit", JSONObject().apply { put("type", "BOOLEAN") })
-                    })
-                    put("required", JSONArray().apply { put("text") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "captureScreenImage")
-                put("description", "Visual fallback (Android 11+): capture a compressed screenshot of the active screen and send it for visual inspection when readScreen has no readable UI nodes (games, canvas, protected views).")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("question", JSONObject().apply { put("type", "STRING") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "describeScreen")
-                put("description", "Read and explain the currently open Android app screen in the user's language.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("question", JSONObject().apply { put("type", "STRING") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "analyzeScreenshot")
-                put("description", "Capture an active screen screenshot (API 30+) and analyze its visual layout and visible text.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("question", JSONObject().apply { put("type", "STRING") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "readTextFromCamera")
-                put("description", "Extract readable text (OCR in English, Hindi, Urdu) from the current camera frame in Neural Lens.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("explain", JSONObject().apply { put("type", "BOOLEAN") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "readTextFromScreenshot")
-                put("description", "Capture a screenshot (API 30+) and extract readable text (OCR in English, Hindi, Urdu).")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("explain", JSONObject().apply { put("type", "BOOLEAN") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "identifyObjects")
-                put("description", "Identify visible objects, gadgets, or products in the active Neural Lens frame.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject())
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "recognizeScene")
-                put("description", "Recognize the indoor/outdoor environment, lighting, and scene context from the active frame.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject())
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "describeCameraView")
-                put("description", "Describe what is currently visible in the Neural Lens camera view.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("question", JSONObject().apply { put("type", "STRING") })
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "summarizeNotifications")
-                put("description", "Summarize active device notifications with priority levels and automatic OTP/card redaction.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject())
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "openGalleryAnalysis")
-                put("description", "Open the zero-permission Android Photo Picker so the user can choose a gallery image for vision analysis.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject())
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "compareImages")
-                put("description", "Open the zero-permission Android Photo Picker to select two images and compare them side-by-side.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject())
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "askAboutLastImage")
-                put("description", "Ask a follow-up question about the last analyzed camera frame, screenshot, or gallery photo.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("question", JSONObject().apply { put("type", "STRING") })
-                    })
-                    put("required", JSONArray().apply { put("question") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "performScreenTask")
-                put("description", "Run Mahi's autonomous screen agent loop (Observe -> Think -> Act -> Verify) to complete multi-step goals inside apps like Facebook, YouTube, Instagram, TikTok, WhatsApp, or Chrome (e.g., play first video, like/unlike, follow/subscribe, comment, search a name, save without sharing).")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("goal", JSONObject().apply { put("type", "STRING") })
-                    })
-                    put("required", JSONArray().apply { put("goal") })
-                })
-            })
-            put(JSONObject().apply {
-                put("name", "setWatchMode")
-                put("description", "Turn Gemini Live continuous Screen Watch Mode ON or OFF so Mahi periodically sees redacted screen frames (~every 2s) and screen summaries when explicitly requested by the user.")
-                put("parameters", JSONObject().apply {
-                    put("type", "OBJECT")
-                    put("properties", JSONObject().apply {
-                        put("enabled", JSONObject().apply { put("type", "BOOLEAN") })
-                    })
-                    put("required", JSONArray().apply { put("enabled") })
-                })
-            })
+            put(fnDecl("readScreen", "Read current foreground app accessibility UI tree.", emptyMap()))
+            put(fnDecl(
+                "tapElement",
+                "Tap a UI element on screen by index, text query, viewId, or coordinates.",
+                mapOf(
+                    "index" to prop("INTEGER", "1-based element index from readScreen"),
+                    "query" to prop("STRING", "Visible label or contentDescription"),
+                    "viewId" to prop("STRING", "Optional resource viewId"),
+                    "x" to prop("NUMBER", "Optional X coordinate"),
+                    "y" to prop("NUMBER", "Optional Y coordinate")
+                )
+            ))
+            put(fnDecl(
+                "typeText",
+                "Type text into an editable field on screen.",
+                mapOf(
+                    "index" to prop("INTEGER", "1-based target input index"),
+                    "query" to prop("STRING", "Input field label"),
+                    "text" to prop("STRING", "Text to type"),
+                    "append" to prop("BOOLEAN", "Append instead of replacing"),
+                    "clearFirst" to prop("BOOLEAN", "Clear text before typing"),
+                    "submit" to prop("BOOLEAN", "Submit or press send after typing")
+                ),
+                required = listOf("text")
+            ))
+            put(fnDecl("captureScreenImage", "Capture current screen screenshot for visual inspection.", mapOf("question" to prop("STRING", "Question about screen"))))
+            put(fnDecl("describeScreen", "Read and explain the current screen using accessibility + AI.", mapOf("question" to prop("STRING", "Specific question"))))
+            put(fnDecl("analyzeScreenshot", "Capture screenshot and explain it.", mapOf("question" to prop("STRING", "Specific question"))))
+            put(fnDecl("readTextFromCamera", "Read OCR text from latest camera frame.", mapOf("explain" to prop("BOOLEAN", "Explain with AI"))))
+            put(fnDecl("readTextFromScreenshot", "Read OCR text from screenshot.", mapOf("explain" to prop("BOOLEAN", "Explain with AI"))))
+            put(fnDecl("identifyObjects", "Identify objects in latest camera/image.", emptyMap()))
+            put(fnDecl("recognizeScene", "Recognize scene from latest image.", emptyMap()))
+            put(fnDecl("describeCameraView", "Describe what camera sees.", mapOf("question" to prop("STRING", "Question"))))
+            put(fnDecl("summarizeNotifications", "Safely summarize notifications with PII redaction.", emptyMap()))
+            put(fnDecl("openGalleryAnalysis", "Open photo picker to analyze an image.", emptyMap()))
+            put(fnDecl("compareImages", "Compare two selected images.", emptyMap()))
+            put(fnDecl("askAboutLastImage", "Ask question about last selected image.", mapOf("question" to prop("STRING", "Question")), required = listOf("question")))
+            put(fnDecl(
+                "screenGesture",
+                "Perform swipe, scroll, back, or STOP gesture on screen.",
+                mapOf(
+                    "action" to prop("STRING", "SWIPE_UP, SWIPE_DOWN, SWIPE_LEFT, SWIPE_RIGHT, FAST_SCROLL_DOWN, FAST_SCROLL_UP, TAP_INDEX, DOUBLE_TAP, LONG_PRESS, STOP"),
+                    "targetText" to prop("STRING", "Optional target text"),
+                    "targetIndex" to prop("INTEGER", "Optional 1-based target index"),
+                    "startX" to prop("NUMBER", "Optional drag start X"),
+                    "startY" to prop("NUMBER", "Optional drag start Y"),
+                    "endX" to prop("NUMBER", "Optional drag end X"),
+                    "endY" to prop("NUMBER", "Optional drag end Y")
+                ),
+                required = listOf("action")
+            ))
+            put(fnDecl("setVolume", "Adjust Android audio stream volume percentage.", mapOf("stream" to prop("STRING", "media, ringtone, alarm, notification, call"), "percent" to prop("INTEGER", "0 to 100")), required = listOf("percent")))
+            put(fnDecl("openQuickSettings", "Expand Android Quick Settings panel.", emptyMap()))
+            put(fnDecl("performScreenTask", "Execute multi-step autonomous screen goal on an app.", mapOf("goal" to prop("STRING", "User goal")), required = listOf("goal")))
+            put(fnDecl("setWatchMode", "Turn continuous screen watch mode ON or OFF.", mapOf("enabled" to prop("BOOLEAN", "true or false")), required = listOf("enabled")))
         }
-
-        fun classifyCloseOrFailureError(code: Int?, reasonOrMessage: String): GeminiLiveError {
-            val lower = reasonOrMessage.lowercase()
-            return when {
-                code == 401 || code == 403 || lower.contains("api key") ||
-                    lower.contains("unauthenticated") || lower.contains("permission_denied") ||
-                    lower.contains("unauthorized") -> {
-                    GeminiLiveError(
-                        ApiErrorCategory.INVALID_KEY,
-                        "Invalid Gemini API key or access denied${if (reasonOrMessage.isNotBlank()) ": ${reasonOrMessage.take(140)}" else "."}"
-                    )
-                }
-                code == 429 || lower.contains("quota") || lower.contains("resource_exhausted") ||
-                    lower.contains("rate limit") -> {
-                    GeminiLiveError(
-                        ApiErrorCategory.QUOTA_EXCEEDED,
-                        "Gemini Live quota or rate limit exceeded${if (reasonOrMessage.isNotBlank()) ": ${reasonOrMessage.take(140)}" else "."}"
-                    )
-                }
-                code == 404 || lower.contains("not found") || lower.contains("not supported for bidigeneratecontent") ||
-                    lower.contains("unsupported model") || (lower.contains("model") && lower.contains("invalid")) -> {
-                    GeminiLiveError(
-                        ApiErrorCategory.UNSUPPORTED_MODEL,
-                        "Selected Gemini model does not support Live audio-to-audio${if (reasonOrMessage.isNotBlank()) ": ${reasonOrMessage.take(140)}" else "."}"
-                    )
-                }
-                else -> {
-                    GeminiLiveError(
-                        ApiErrorCategory.CONNECTION_FAILED,
-                        "Gemini Live connection failed${if (reasonOrMessage.isNotBlank()) ": ${reasonOrMessage.take(140)}" else "."}"
-                    )
-                }
-            }
-        }
-
-        fun isRecoverableError(error: GeminiLiveError): Boolean {
-            return error.category == ApiErrorCategory.CONNECTION_FAILED
-        }
-    }
-
-    private sealed class PlaybackCommand {
-        class AudioChunk(val pcmBytes: ByteArray) : PlaybackCommand()
-        object TurnCompleteMarker : PlaybackCommand()
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val sessionCounter = AtomicLong(0L)
-    private val reconnectAttempts = AtomicInteger(0)
-    private val isPlaybackDrainingTurn = AtomicBoolean(false)
-
-    @Volatile
     private var webSocket: WebSocket? = null
-
-    @Volatile
+    private var micJob: Job? = null
+    private var audioRecord: AudioRecord? = null
+    private var echoCanceler: AcousticEchoCanceler? = null
     private var audioTrack: AudioTrack? = null
-
-    @Volatile
-    private var isSetupComplete = false
-
-    @Volatile
-    private var isConnected = false
-
-    @Volatile
-    private var isMuted = false
-
-    @Volatile
-    private var manualDisconnect = false
-
-    @Volatile
-    private var callbacks: GeminiLiveCallbacks? = null
-
-    // Session params retained for bounded reconnect & context continuity
+    private val activeFlag = AtomicBoolean(false)
+    private var resumptionHandle: String? = null
     private var lastApiKey: String = ""
-    private var lastModel: String = ""
+    private var lastModel: String = "gemini-2.0-flash-live-001"
     private var lastSystemPrompt: String = ""
     private var lastVoiceName: String = "Aoede"
-    private val recentTurns = mutableListOf<Pair<String, String>>() // role to text
-    private var reconnectJob: Job? = null
 
-    // Inbound pre-setup audio buffer (drops oldest if setup handshake is still in progress)
-    private var inboundAudioBuffer = Channel<ByteArray>(
-        capacity = 48,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST
-    )
-    private var inboundFlushJob: Job? = null
+    private val _status = MutableStateFlow(GeminiLiveStatus.IDLE)
+    val status: StateFlow<GeminiLiveStatus> = _status.asStateFlow()
 
-    // Persistent sequential playback queue so all PCM chunks play cleanly in order
-    private var playbackQueue = Channel<PlaybackCommand>(capacity = Channel.UNLIMITED)
-    private var playbackJob: Job? = null
+    private val _inputTranscript = MutableStateFlow("")
+    val inputTranscript: StateFlow<String> = _inputTranscript.asStateFlow()
 
-    private val _connectionPhase = MutableStateFlow(GeminiLiveConnectionPhase.DISCONNECTED)
-    val connectionPhase: StateFlow<GeminiLiveConnectionPhase> = _connectionPhase.asStateFlow()
+    private val _outputTranscript = MutableStateFlow("")
+    val outputTranscript: StateFlow<String> = _outputTranscript.asStateFlow()
 
-    private val _speakingWaveform = MutableStateFlow(List(32) { 0.05f })
-    val speakingWaveform: StateFlow<List<Float>> = _speakingWaveform.asStateFlow()
+    private val _lastError = MutableStateFlow<String?>(null)
+    val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
-    private var waveformPhase = 0.0
+    var onToolCall: (suspend (LiveToolCallRequest) -> String)? = null
+    var onMicAmplitude: ((Float) -> Unit)? = null
 
-    fun setMuted(muted: Boolean) {
-        isMuted = muted
-        if (muted) flushPlaybackQueueOnly()
-    }
-
-    fun updateSystemInstruction(newSystemPrompt: String) {
-        lastSystemPrompt = newSystemPrompt
-    }
+    fun isSessionActive(): Boolean = activeFlag.get() && webSocket != null
 
     fun connect(
         apiKey: String,
-        model: String,
+        model: String = "gemini-2.0-flash-live-001",
         systemPrompt: String,
-        callbacks: GeminiLiveCallbacks,
-        voiceName: String = "Aoede"
-    ) {
-        reconnectJob?.cancel()
-        reconnectAttempts.set(0)
-        recentTurns.clear()
-
-        val trimmedKey = apiKey.trim()
-        if (trimmedKey.isEmpty()) {
-            _connectionPhase.value = GeminiLiveConnectionPhase.ERROR
-            callbacks.onError(
-                GeminiLiveError(
-                    ApiErrorCategory.MISSING_KEY,
-                    "Google Gemini API key is missing. Add your key in API Keys & Providers to start Gemini Live."
-                )
-            )
-            return
+        voiceName: String = "Aoede",
+        startMicCapture: Boolean = true
+    ): Result<Unit> {
+        val cleanKey = apiKey.trim()
+        if (cleanKey.isBlank()) {
+            val msg = "Gemini API key required for Gemini Live BidiGenerateContent."
+            _status.value = GeminiLiveStatus.BLOCKED
+            _lastError.value = msg
+            return Result.failure(IllegalStateException(msg))
         }
-
-        if (!isGeminiLiveAudioModel(model)) {
-            _connectionPhase.value = GeminiLiveConnectionPhase.ERROR
-            callbacks.onError(
-                GeminiLiveError(
-                    ApiErrorCategory.UNSUPPORTED_MODEL,
-                    "Model '$model' does not support Gemini Live audio-to-audio. Select a Live model (e.g., gemini-2.5-flash-native-audio-preview-12-2025)."
-                )
-            )
-            return
-        }
-
-        lastApiKey = trimmedKey
-        lastModel = model
+        disconnect()
+        lastApiKey = cleanKey
+        lastModel = model.removePrefix("models/").ifBlank { "gemini-2.0-flash-live-001" }
         lastSystemPrompt = systemPrompt
         lastVoiceName = voiceName
-        this.callbacks = callbacks
+        activeFlag.set(true)
+        _status.value = GeminiLiveStatus.CONNECTING
+        _lastError.value = null
 
-        openWebSocketInternal(isReconnectAttempt = false)
-    }
+        val request = Request.Builder()
+            .url(LIVE_WS_URL)
+            .addHeader("x-goog-api-key", cleanKey)
+            .build()
 
-    private fun openWebSocketInternal(isReconnectAttempt: Boolean) {
-        // Cleanly close any stale socket before opening a new generation
-        closeSocketOnly(manual = true)
-
-        val generation = sessionCounter.incrementAndGet()
-        manualDisconnect = false
-        isConnected = false
-        isSetupComplete = false
-        _connectionPhase.value = if (isReconnectAttempt) {
-            GeminiLiveConnectionPhase.RECONNECTING
-        } else {
-            GeminiLiveConnectionPhase.CONNECTING
-        }
-
-        ensurePlaybackWorkerRunning()
-        ensureInboundAudioWorkerRunning(generation)
-
-        val request = buildWebSocketRequest(lastApiKey)
-        webSocket = okHttpClient.newWebSocket(request, object : WebSocketListener() {
+        webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                if (sessionCounter.get() != generation) {
-                    webSocket.close(1000, "Superseded session")
-                    return
-                }
-                isConnected = true
-                val setupPayload = buildSetupMessage(lastModel, lastSystemPrompt, lastVoiceName)
-                webSocket.send(setupPayload)
+                sendSetup(webSocket, lastModel, lastSystemPrompt, lastVoiceName)
+                initAudioTrack()
+                if (startMicCapture) startMicLoop()
+                _status.value = GeminiLiveStatus.LISTENING
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                if (sessionCounter.get() != generation) return
-                handleServerMessage(text)
+                handleServerJson(text)
             }
 
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                if (sessionCounter.get() != generation) return
-                handleServerMessage(bytes.utf8())
-            }
-
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                if (sessionCounter.get() != generation) return
-                webSocket.close(1000, null)
-                if (!manualDisconnect && code != 1000) {
-                    handleConnectionInterruption(code, reason)
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                val msg = "Gemini Live disconnected (${response?.code ?: 0}): ${t.localizedMessage ?: "socket failure"}"
+                _lastError.value = msg
+                _status.value = GeminiLiveStatus.ERROR
+                if (activeFlag.get() && resumptionHandle != null) {
+                    scheduleReconnect()
+                } else {
+                    stopAudioHardware()
+                    activeFlag.set(false)
                 }
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (sessionCounter.get() != generation) return
-                isConnected = false
-                isSetupComplete = false
-                if (!manualDisconnect) {
-                    if (code != 1000) {
-                        handleConnectionInterruption(code, reason)
-                    } else {
-                        _connectionPhase.value = GeminiLiveConnectionPhase.DISCONNECTED
-                        callbacks?.onDisconnected()
-                    }
-                }
-            }
-
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                if (sessionCounter.get() != generation) return
-                isConnected = false
-                isSetupComplete = false
-                if (!manualDisconnect) {
-                    val msg = response?.message?.takeIf { it.isNotBlank() }
-                        ?: t.localizedMessage
-                        ?: "WebSocket handshake failed"
-                    handleConnectionInterruption(response?.code, msg)
-                }
+                stopAudioHardware()
+                activeFlag.set(false)
+                _status.value = GeminiLiveStatus.IDLE
             }
         })
+        return Result.success(Unit)
     }
 
-    private fun handleConnectionInterruption(code: Int?, reasonOrMessage: String) {
-        val error = classifyCloseOrFailureError(code, reasonOrMessage)
-        val attempt = reconnectAttempts.incrementAndGet()
-
-        if (isRecoverableError(error) && attempt <= MAX_RECONNECT_ATTEMPTS && lastApiKey.isNotBlank()) {
-            val backoffMs = 1000L * (1 shl (attempt - 1)) // 1s, 2s, 4s
-            _connectionPhase.value = GeminiLiveConnectionPhase.RECONNECTING
-            callbacks?.onReconnecting(attempt, MAX_RECONNECT_ATTEMPTS, error.message)
-            reconnectJob?.cancel()
-            reconnectJob = scope.launch {
-                delay(backoffMs)
-                if (!manualDisconnect) {
-                    openWebSocketInternal(isReconnectAttempt = true)
-                }
+    private fun scheduleReconnect() {
+        _status.value = GeminiLiveStatus.RECONNECTING
+        scope.launch {
+            delay(1_400L)
+            if (activeFlag.get() && lastApiKey.isNotBlank()) {
+                connect(lastApiKey, lastModel, lastSystemPrompt, lastVoiceName, startMicCapture = true)
             }
-        } else {
-            isConnected = false
-            isSetupComplete = false
-            stopAudioPlaybackWorker()
-            _connectionPhase.value = GeminiLiveConnectionPhase.ERROR
-            callbacks?.onError(error)
         }
     }
 
-    private fun handleServerMessage(rawJson: String) {
-        try {
-            val json = JSONObject(rawJson)
-
-            if (json.has("error")) {
-                val errObj = json.optJSONObject("error")
-                val code = errObj?.optInt("code")
-                val msg = errObj?.optString("message") ?: json.optString("error")
-                val error = classifyCloseOrFailureError(code, msg)
-                _connectionPhase.value = GeminiLiveConnectionPhase.ERROR
-                callbacks?.onError(error)
-                return
-            }
-
-            if (json.has("setupComplete")) {
-                val wasReconnect = reconnectAttempts.get() > 0
-                reconnectAttempts.set(0)
-                isSetupComplete = true
-                _connectionPhase.value = GeminiLiveConnectionPhase.CONNECTED_LISTENING
-                if (wasReconnect && recentTurns.isNotEmpty()) {
-                    replayRecentContextSummary()
-                }
-                callbacks?.onSetupComplete()
-            }
-
-            val serverContent = json.optJSONObject("serverContent")
-            if (serverContent != null) {
-                if (serverContent.optBoolean("interrupted", false)) {
-                    flushPlaybackQueueOnly()
-                    _connectionPhase.value = GeminiLiveConnectionPhase.CONNECTED_LISTENING
-                    callbacks?.onAssistantSpeakingChanged(false)
-                    callbacks?.onInterrupted()
-                }
-
-                serverContent.optJSONObject("inputTranscription")?.optString("text")
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { userText ->
-                        appendRecentTurn("user", userText)
-                        callbacks?.onUserTranscript(userText)
-                    }
-
-                serverContent.optJSONObject("outputTranscription")?.optString("text")
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { modelText ->
-                        appendRecentTurn("model", modelText)
-                        callbacks?.onAssistantTranscript(modelText)
-                    }
-
-                val modelTurn = serverContent.optJSONObject("modelTurn")
-                val parts = modelTurn?.optJSONArray("parts")
-                if (parts != null) {
-                    for (i in 0 until parts.length()) {
-                        val part = parts.optJSONObject(i) ?: continue
-                        val inlineData = part.optJSONObject("inlineData")
-                        if (inlineData != null) {
-                            val mime = inlineData.optString("mimeType")
-                            val b64 = inlineData.optString("data")
-                            if (mime.startsWith("audio/pcm") && b64.isNotBlank()) {
-                                val pcmBytes = Base64.decode(b64, Base64.DEFAULT)
-                                if (pcmBytes.isNotEmpty() && !isMuted) {
-                                    isPlaybackDrainingTurn.set(true)
-                                    _connectionPhase.value = GeminiLiveConnectionPhase.SPEAKING
-                                    playbackQueue.trySend(PlaybackCommand.AudioChunk(pcmBytes))
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (serverContent.optBoolean("turnComplete", false)) {
-                    // Signal worker that turn finished generating; worker fires speakingChanged(false) ONLY after draining!
-                    playbackQueue.trySend(PlaybackCommand.TurnCompleteMarker)
-                }
-            }
-
-            if (json.has("goAway")) {
-                val timeLeft = json.optJSONObject("goAway")?.optString("timeLeft").orEmpty()
-                Log.w(TAG, "Gemini Live server goAway received (timeLeft=$timeLeft)")
-                if (!manualDisconnect) {
-                    handleConnectionInterruption(null, "Server requested session refresh ($timeLeft)")
-                    return
-                }
-            }
-
-            val toolCallCancellation = json.optJSONObject("toolCallCancellation")
-            val cancelledIds = mutableSetOf<String>()
-            val idsArray = toolCallCancellation?.optJSONArray("ids")
-            if (idsArray != null) {
-                for (i in 0 until idsArray.length()) {
-                    val cancelledId = idsArray.optString(i)
-                    if (cancelledId.isNotBlank()) {
-                        cancelledIds.add(cancelledId)
-                    }
-                }
-            }
-
-            val toolCall = json.optJSONObject("toolCall")
-            val functionCalls = toolCall?.optJSONArray("functionCalls")
-            if (functionCalls != null) {
-                for (i in 0 until functionCalls.length()) {
-                    val call = functionCalls.optJSONObject(i) ?: continue
-                    val callId = call.optString("id")
-                    if (callId in cancelledIds) continue
-                    val name = call.optString("name")
-                    val argsObj = call.optJSONObject("args") ?: JSONObject()
-                    val params = mutableMapOf<String, String>()
-                    argsObj.keys().forEach { k ->
-                        params[k] = argsObj.opt(k)?.toString().orEmpty()
-                    }
-                    callbacks?.onToolCall(callId, ToolAction(name, params))
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse Gemini Live server frame", e)
-        }
-    }
-
-    private fun appendRecentTurn(role: String, text: String) {
-        synchronized(recentTurns) {
-            if (recentTurns.lastOrNull()?.first == role) {
-                val prev = recentTurns.removeAt(recentTurns.lastIndex)
-                recentTurns.add(role to (prev.second + " " + text).takeLast(320))
-            } else {
-                recentTurns.add(role to text.take(320))
-            }
-            while (recentTurns.size > 6) recentTurns.removeAt(0)
-        }
-    }
-
-    private fun replayRecentContextSummary() {
-        val summaryText = synchronized(recentTurns) {
-            recentTurns.joinToString("\n") { "${it.first}: ${it.second}" }
-        }
-        if (summaryText.isBlank()) return
-        val payload = JSONObject().apply {
-            put("clientContent", JSONObject().apply {
-                put("turns", JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("role", "user")
-                        put("parts", JSONArray().apply {
-                            put(JSONObject().apply {
-                                put("text", "[Context continuity after reconnect — do not reply unless spoken to]:\n$summaryText")
-                            })
+    private fun sendSetup(ws: WebSocket, model: String, systemPrompt: String, voiceName: String) {
+        val setup = JSONObject().apply {
+            put("model", "models/$model")
+            put("generationConfig", JSONObject().apply {
+                put("responseModalities", JSONArray().put("AUDIO"))
+                put("speechConfig", JSONObject().apply {
+                    put("voiceConfig", JSONObject().apply {
+                        put("prebuiltVoiceConfig", JSONObject().apply {
+                            put("voiceName", voiceName)
                         })
                     })
                 })
-                put("turnComplete", false)
             })
-        }.toString()
-        webSocket?.send(payload)
-    }
-
-    private fun ensureInboundAudioWorkerRunning(generation: Long) {
-        inboundFlushJob?.cancel()
-        inboundAudioBuffer.close()
-        inboundAudioBuffer = Channel(capacity = 48, onBufferOverflow = BufferOverflow.DROP_OLDEST)
-        inboundFlushJob = scope.launch {
-            for (chunk in inboundAudioBuffer) {
-                if (sessionCounter.get() != generation || manualDisconnect) break
-                if (isConnected && isSetupComplete) {
-                    sendPcmChunkOverSocket(chunk)
-                }
+            put("inputAudioTranscription", JSONObject())
+            put("outputAudioTranscription", JSONObject())
+            if (resumptionHandle != null) {
+                put("sessionResumption", JSONObject().put("handle", resumptionHandle))
+            } else {
+                put("sessionResumption", JSONObject())
             }
+            if (systemPrompt.isNotBlank()) {
+                put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt))))
+            }
+            put("tools", JSONArray().put(JSONObject().put("functionDeclarations", buildToolDeclarations())))
         }
+        ws.send(JSONObject().put("setup", setup).toString())
     }
 
-    fun sendPcmAudioChunk(pcm16At16kBytes: ByteArray) {
-        if (pcm16At16kBytes.isEmpty() || manualDisconnect) return
-        if (isConnected && isSetupComplete) {
-            sendPcmChunkOverSocket(pcm16At16kBytes)
-        } else {
-            // Buffer cleanly during brief setupComplete / reconnect window without blocking caller
-            inboundAudioBuffer.trySend(pcm16At16kBytes)
-        }
-    }
-
-    private fun sendPcmChunkOverSocket(pcm16At16kBytes: ByteArray) {
-        val b64 = Base64.encodeToString(pcm16At16kBytes, Base64.NO_WRAP)
-        val payload = JSONObject().apply {
-            put("realtimeInput", JSONObject().apply {
-                put("mediaChunks", JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("mimeType", "audio/pcm;rate=16000")
-                        put("data", b64)
-                    })
-                })
+    fun sendTextTurn(userText: String): Boolean {
+        val ws = webSocket ?: return false
+        interruptPlayback()
+        _status.value = GeminiLiveStatus.THINKING
+        val msg = JSONObject().apply {
+            put("clientContent", JSONObject().apply {
+                put("turns", JSONArray().put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().put(JSONObject().put("text", userText)))
+                }))
+                put("turnComplete", true)
             })
-        }.toString()
-        webSocket?.send(payload)
+        }
+        return ws.send(msg.toString())
     }
 
     fun sendImageFrame(jpegBytes: ByteArray): Boolean {
-        if (jpegBytes.isEmpty() || !isConnected || !isSetupComplete || manualDisconnect) return false
-        val b64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
-        val payload = JSONObject().apply {
+        val ws = webSocket ?: return false
+        if (jpegBytes.isEmpty()) return false
+        val msg = JSONObject().apply {
             put("realtimeInput", JSONObject().apply {
-                put("mediaChunks", JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("mimeType", "image/jpeg")
-                        put("data", b64)
-                    })
-                })
+                put("mediaChunks", JSONArray().put(JSONObject().apply {
+                    put("mimeType", "image/jpeg")
+                    put("data", Base64.encodeToString(jpegBytes, Base64.NO_WRAP))
+                }))
             })
-        }.toString()
-        return webSocket?.send(payload) ?: false
-    }
-
-    /**
-     * Sends silent context updates (like Screen Watch summary diffs) without triggering a turn interruption.
-     */
-    fun sendRealtimeTextHint(text: String): Boolean {
-        if (text.isBlank() || !isConnected || !isSetupComplete || manualDisconnect) return false
-        val payload = JSONObject().apply {
-            put("clientContent", JSONObject().apply {
-                put("turns", JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("role", "user")
-                        put("parts", JSONArray().apply {
-                            put(JSONObject().apply { put("text", text) })
-                        })
-                    })
-                })
-                put("turnComplete", false)
-            })
-        }.toString()
-        return webSocket?.send(payload) ?: false
-    }
-
-    fun sendToolResponse(callId: String, name: String, resultMessage: String, success: Boolean) {
-        if (!isConnected) return
-        val payload = JSONObject().apply {
-            put("toolResponse", JSONObject().apply {
-                put("functionResponses", JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("id", callId)
-                        put("name", name)
-                        put("response", JSONObject().apply {
-                            put("success", success)
-                            put("message", resultMessage)
-                        })
-                    })
-                })
-            })
-        }.toString()
-        webSocket?.send(payload)
-    }
-
-    fun sendTextPromptOverAudioSession(prompt: String) {
-        if (!isConnected || !isSetupComplete || prompt.isBlank()) return
-        appendRecentTurn("user", prompt)
-        val payload = JSONObject().apply {
-            put("clientContent", JSONObject().apply {
-                put("turns", JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("role", "user")
-                        put("parts", JSONArray().apply {
-                            put(JSONObject().apply { put("text", prompt) })
-                        })
-                    })
-                })
-                put("turnComplete", true)
-            })
-        }.toString()
-        webSocket?.send(payload)
+        }
+        return ws.send(msg.toString())
     }
 
     fun interruptPlayback() {
-        flushPlaybackQueueOnly()
-        if (isConnected && isSetupComplete) {
-            _connectionPhase.value = GeminiLiveConnectionPhase.CONNECTED_LISTENING
+        try {
+            audioTrack?.pause()
+            audioTrack?.flush()
+            audioTrack?.play()
+            if (_status.value == GeminiLiveStatus.SPEAKING) {
+                _status.value = GeminiLiveStatus.LISTENING
+            }
+        } catch (_: Exception) {
         }
-        callbacks?.onAssistantSpeakingChanged(false)
     }
 
-    private fun ensurePlaybackWorkerRunning() {
-        if (playbackJob?.isActive == true) return
-        playbackQueue.close()
-        playbackQueue = Channel(capacity = Channel.UNLIMITED)
-        playbackJob = scope.launch {
-            initAudioTrack()
-            for (cmd in playbackQueue) {
-                if (!isActive || manualDisconnect) break
-                when (cmd) {
-                    is PlaybackCommand.AudioChunk -> {
-                        if (!isMuted) {
-                            writePcmToTrack(cmd.pcmBytes)
+    private fun handleServerJson(raw: String) {
+        try {
+            val root = JSONObject(raw)
+            root.optJSONObject("sessionResumptionUpdate")?.optString("newHandle")?.takeIf { it.isNotBlank() }?.let {
+                resumptionHandle = it
+            }
+            if (root.has("goAway")) {
+                scheduleReconnect()
+                return
+            }
+            root.optJSONObject("serverContent")?.let { sc ->
+                if (sc.optBoolean("interrupted", false)) {
+                    interruptPlayback()
+                }
+                sc.optJSONObject("inputTranscription")?.optString("text")?.takeIf { it.isNotBlank() }?.let { t ->
+                    interruptPlayback()
+                    _inputTranscript.value = t
+                }
+                sc.optJSONObject("outputTranscription")?.optString("text")?.takeIf { it.isNotBlank() }?.let { t ->
+                    _outputTranscript.value = (_outputTranscript.value + t).takeLast(600)
+                }
+                val parts = sc.optJSONObject("modelTurn")?.optJSONArray("parts")
+                if (parts != null) {
+                    for (i in 0 until parts.length()) {
+                        val p = parts.optJSONObject(i) ?: continue
+                        p.optString("text").takeIf { it.isNotBlank() }?.let { t ->
+                            _outputTranscript.value = t
                         }
-                    }
-                    PlaybackCommand.TurnCompleteMarker -> {
-                        isPlaybackDrainingTurn.set(false)
-                        _speakingWaveform.value = List(32) { 0.05f }
-                        if (isConnected && isSetupComplete) {
-                            _connectionPhase.value = GeminiLiveConnectionPhase.CONNECTED_LISTENING
+                        val inline = p.optJSONObject("inlineData")
+                        val mime = inline?.optString("mimeType").orEmpty()
+                        val b64 = inline?.optString("data").orEmpty()
+                        if (mime.startsWith("audio/pcm") && b64.isNotBlank()) {
+                            _status.value = GeminiLiveStatus.SPEAKING
+                            val pcm = Base64.decode(b64, Base64.DEFAULT)
+                            playPcmChunk(pcm)
                         }
-                        callbacks?.onAssistantSpeakingChanged(false)
                     }
                 }
+                if (sc.optBoolean("turnComplete", false)) {
+                    _status.value = GeminiLiveStatus.LISTENING
+                }
             }
+            root.optJSONObject("toolCall")?.optJSONArray("functionCalls")?.let { calls ->
+                handleToolCalls(calls)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun handleToolCalls(calls: JSONArray) {
+        val handler = onToolCall ?: return
+        scope.launch {
+            val responses = JSONArray()
+            for (i in 0 until calls.length()) {
+                val c = calls.optJSONObject(i) ?: continue
+                val id = c.optString("id")
+                val name = c.optString("name")
+                val argsObj = c.optJSONObject("args") ?: JSONObject()
+                val params = mutableMapOf<String, String>()
+                val keys = argsObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    params[k] = argsObj.opt(k)?.toString().orEmpty()
+                }
+                val resultText = runCatching { handler(LiveToolCallRequest(id, name, params)) }
+                    .getOrElse { "Tool error: ${it.localizedMessage}" }
+                responses.put(JSONObject().apply {
+                    put("id", id)
+                    put("name", name)
+                    put("response", JSONObject().put("result", resultText))
+                })
+            }
+            val payload = JSONObject().put("toolResponse", JSONObject().put("functionResponses", responses))
+            webSocket?.send(payload.toString())
         }
     }
 
     private fun initAudioTrack() {
-        releaseAudioTrackOnly()
         try {
             val minBuf = AudioTrack.getMinBufferSize(
                 OUTPUT_SAMPLE_RATE,
                 AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT
-            )
+            ).coerceAtLeast(4096)
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
                 .setAudioFormat(
                     AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                         .setSampleRate(OUTPUT_SAMPLE_RATE)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                         .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                         .build()
                 )
-                .setBufferSizeInBytes(maxOf(minBuf * 3, 16384))
+                .setBufferSizeInBytes(minBuf * 2)
                 .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-            audioTrack?.play()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize persistent 24kHz AudioTrack", e)
-        }
-    }
-
-    private fun writePcmToTrack(pcmBytes: ByteArray) {
-        if (pcmBytes.isEmpty()) return
-        callbacks?.onAssistantSpeakingChanged(true)
-
-        var sumSquares = 0.0
-        val sampleCount = pcmBytes.size / 2
-        for (i in 0 until sampleCount) {
-            val lo = pcmBytes[i * 2].toInt() and 0xFF
-            val hi = pcmBytes[i * 2 + 1].toInt()
-            val sample = ((hi shl 8) or lo).toShort().toDouble()
-            sumSquares += sample * sample
-        }
-        if (sampleCount > 0) {
-            val rms = sqrt(sumSquares / sampleCount)
-            val amp = min(1.0f, (rms.toFloat() / 32767f) * 6.0f).coerceAtLeast(0.15f)
-            waveformPhase += 0.28
-            _speakingWaveform.value = List(32) { idx ->
-                val centerFactor = 1.0f - abs(idx - 16) / 16f
-                val wave = abs(sin(waveformPhase + idx * 0.35).toFloat())
-                (amp * (0.45f + 0.55f * wave) * (0.55f + 0.45f * centerFactor)).coerceIn(0.08f, 1.0f)
-            }
-        }
-
-        try {
-            if (audioTrack == null || audioTrack?.playState != AudioTrack.PLAYSTATE_PLAYING) {
-                initAudioTrack()
-            }
-            var offset = 0
-            while (offset < pcmBytes.size && !manualDisconnect && !isMuted) {
-                val written = audioTrack?.write(pcmBytes, offset, pcmBytes.size - offset) ?: break
-                if (written <= 0) break
-                offset += written
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Error streaming PCM chunk to AudioTrack", e)
-        }
-    }
-
-    private fun flushPlaybackQueueOnly() {
-        while (playbackQueue.tryReceive().isSuccess) {
-            // Drain unplayed audio chunks immediately on barge-in
-        }
-        isPlaybackDrainingTurn.set(false)
-        _speakingWaveform.value = List(32) { 0.05f }
-        try {
-            audioTrack?.pause()
-            audioTrack?.flush()
-            audioTrack?.play()
+                .build().also { it.play() }
         } catch (_: Exception) {
         }
     }
 
-    private fun releaseAudioTrackOnly() {
-        _speakingWaveform.value = List(32) { 0.05f }
+    private fun playPcmChunk(pcm: ByteArray) {
         try {
+            audioTrack?.write(pcm, 0, pcm.size)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun startMicLoop() {
+        micJob?.cancel()
+        micJob = scope.launch {
+            try {
+                val minBuf = AudioRecord.getMinBufferSize(
+                    INPUT_SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                ).coerceAtLeast(3200)
+                val rec = AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    INPUT_SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    minBuf * 2
+                )
+                if (rec.state != AudioRecord.STATE_INITIALIZED) {
+                    rec.release()
+                    return@launch
+                }
+                audioRecord = rec
+                if (AcousticEchoCanceler.isAvailable()) {
+                    echoCanceler = runCatching {
+                        AcousticEchoCanceler.create(rec.audioSessionId)?.apply { enabled = true }
+                    }.getOrNull()
+                }
+                rec.startRecording()
+                val buf = ByteArray(1600)
+                while (isActive && activeFlag.get()) {
+                    val read = rec.read(buf, 0, buf.size)
+                    if (read > 0) {
+                        var sum = 0L
+                        var idx = 0
+                        while (idx + 1 < read) {
+                            val sample = (buf[idx].toInt() and 0xFF) or (buf[idx + 1].toInt() shl 8)
+                            sum += kotlin.math.abs(sample.toShort().toInt())
+                            idx += 2
+                        }
+                        val avgAmp = (sum.toFloat() / (read / 2).coerceAtLeast(1) / 32768f).coerceIn(0f, 1f)
+                        onMicAmplitude?.invoke(avgAmp)
+                        if (avgAmp > 0.14f && _status.value == GeminiLiveStatus.SPEAKING) {
+                            // Barge-in: user started speaking over Mahi
+                            interruptPlayback()
+                        }
+                        val b64 = Base64.encodeToString(buf.copyOf(read), Base64.NO_WRAP)
+                        val chunkJson = JSONObject().put(
+                            "realtimeInput",
+                            JSONObject().put(
+                                "mediaChunks",
+                                JSONArray().put(
+                                    JSONObject().put("mimeType", "audio/pcm;rate=16000").put("data", b64)
+                                )
+                            )
+                        )
+                        webSocket?.send(chunkJson.toString())
+                    }
+                }
+            } catch (se: SecurityException) {
+                _lastError.value = "RECORD_AUDIO permission required for Gemini Live mic: ${se.localizedMessage}"
+                _status.value = GeminiLiveStatus.BLOCKED
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun stopAudioHardware() {
+        micJob?.cancel()
+        micJob = null
+        runCatching { echoCanceler?.release() }
+        echoCanceler = null
+        runCatching {
+            audioRecord?.stop()
+            audioRecord?.release()
+        }
+        audioRecord = null
+        runCatching {
             audioTrack?.pause()
             audioTrack?.flush()
-            audioTrack?.stop()
             audioTrack?.release()
-        } catch (_: Exception) {
         }
         audioTrack = null
     }
 
-    private fun stopAudioPlaybackWorker() {
-        playbackJob?.cancel()
-        playbackJob = null
-        playbackQueue.close()
-        releaseAudioTrackOnly()
-    }
-
-    private fun closeSocketOnly(manual: Boolean) {
-        manualDisconnect = manual
-        isConnected = false
-        isSetupComplete = false
-        try {
-            webSocket?.close(1000, "Client closed session")
-        } catch (_: Exception) {
-        }
-        webSocket = null
-    }
-
-    fun isSessionActive(): Boolean = isConnected && isSetupComplete
-
     fun disconnect() {
-        reconnectJob?.cancel()
-        reconnectJob = null
-        reconnectAttempts.set(0)
-        inboundFlushJob?.cancel()
-        inboundFlushJob = null
-        inboundAudioBuffer.close()
-        closeSocketOnly(manual = true)
-        stopAudioPlaybackWorker()
-        _connectionPhase.value = GeminiLiveConnectionPhase.DISCONNECTED
+        activeFlag.set(false)
+        stopAudioHardware()
+        runCatching { webSocket?.close(1000, "User stopped") }
+        webSocket = null
+        _status.value = GeminiLiveStatus.IDLE
     }
 }

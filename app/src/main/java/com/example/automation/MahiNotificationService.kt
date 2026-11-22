@@ -1,203 +1,118 @@
 package com.example.automation
 
-import android.app.Notification
-import android.app.PendingIntent
 import android.app.RemoteInput
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.os.Bundle
-import android.os.Parcelable
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
-import android.text.TextUtils
+import com.example.vision.NotificationUnderstandingManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.util.concurrent.ConcurrentHashMap
 
 data class CapturedNotification(
     val key: String,
     val packageName: String,
     val appLabel: String,
-    val senderTitle: String,
-    val messageText: String,
+    val sender: String,
+    val bodyRedacted: String,
     val timestampMs: Long,
-    val isWhatsApp: Boolean,
-    val canReply: Boolean
+    val hasReplyAction: Boolean
 )
 
 class MahiNotificationService : NotificationListenerService() {
 
     companion object {
-        private val WHATSAPP_PACKAGES = setOf("com.whatsapp", "com.whatsapp.w4b")
-
-        @Volatile
-        private var instance: MahiNotificationService? = null
+        private val _isConnected = MutableStateFlow(false)
+        val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
         private val _notifications = MutableStateFlow<List<CapturedNotification>>(emptyList())
         val notifications: StateFlow<List<CapturedNotification>> = _notifications.asStateFlow()
 
-        private val replyActions = ConcurrentHashMap<String, Notification.Action>()
+        @Volatile
+        private var instance: MahiNotificationService? = null
 
         fun isListenerEnabled(context: Context): Boolean {
-            if (instance != null) return true
-            return try {
-                val expected = ComponentName(context, MahiNotificationService::class.java).flattenToString()
-                val flat = Settings.Secure.getString(
-                    context.contentResolver,
-                    "enabled_notification_listeners"
-                ) ?: return false
-                val splitter = TextUtils.SimpleStringSplitter(':')
-                splitter.setString(flat)
-                while (splitter.hasNext()) {
-                    if (splitter.next().equals(expected, ignoreCase = true)) return true
-                }
-                false
-            } catch (_: Exception) {
-                false
-            }
+            val flat = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners").orEmpty()
+            val cn = ComponentName(context, MahiNotificationService::class.java).flattenToString()
+            return flat.contains(cn) || flat.contains(context.packageName)
         }
 
-        fun openNotificationListenerSettings(context: Context): Boolean {
-            return try {
-                context.startActivity(
-                    Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                )
-                true
-            } catch (_: Exception) {
-                false
-            }
-        }
+        fun sendAuthorizedReply(notificationKey: String, message: String): AutomationOutcome {
+            val svc = instance
+                ?: return AutomationOutcome(false, "Notification Listener Service not connected.")
+            val clean = message.trim()
+            if (clean.isBlank()) return AutomationOutcome(false, "Reply message cannot be empty.")
+            val active = svc.activeNotifications?.firstOrNull { it.key == notificationKey }
+                ?: return AutomationOutcome(false, "Notification no longer active.")
+            val actions = active.notification?.actions
+                ?: return AutomationOutcome(false, "Notification has no reply actions.")
 
-        fun extractSenderAndMessage(packageName: String, extras: Bundle): Pair<String, String> {
-            val convTitle = extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.toString()?.trim().orEmpty()
-            val baseTitle = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
-            val fallbackText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim()
-                ?: extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
-
-            val rawMessages: Array<out Parcelable>? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                extras.getParcelableArray(Notification.EXTRA_MESSAGES, Parcelable::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                extras.getParcelableArray(Notification.EXTRA_MESSAGES)
-            }
-
-            if (!rawMessages.isNullOrEmpty()) {
-                val lastMsg = rawMessages.lastOrNull() as? Bundle
-                val msgText = lastMsg?.getCharSequence("text")?.toString()?.trim().orEmpty()
-                val msgSender = lastMsg?.getCharSequence("sender")?.toString()?.trim().orEmpty()
-                if (msgText.isNotEmpty()) {
-                    val resolvedTitle = when {
-                        convTitle.isNotEmpty() && msgSender.isNotEmpty() -> "$convTitle ($msgSender)"
-                        msgSender.isNotEmpty() -> msgSender
-                        convTitle.isNotEmpty() -> convTitle
-                        else -> baseTitle.ifBlank { packageName }
-                    }
-                    return resolvedTitle to msgText
+            for (action in actions) {
+                val remotes = action.remoteInputs ?: continue
+                if (remotes.isEmpty()) continue
+                val bundle = Bundle()
+                remotes.forEach { ri -> bundle.putCharSequence(ri.resultKey, clean) }
+                val fill = Intent()
+                RemoteInput.addResultsToIntent(remotes, fill, bundle)
+                return try {
+                    action.actionIntent.send(svc, 0, fill)
+                    AutomationOutcome(true, "Sent authorized reply to ${active.packageName}")
+                } catch (e: Exception) {
+                    AutomationOutcome(false, "Reply failed: ${e.localizedMessage}")
                 }
             }
-
-            return baseTitle.ifBlank { convTitle.ifBlank { packageName } } to fallbackText
-        }
-
-        /**
-         * Sends an authorized reply using Android Notification RemoteInput.
-         * Callers MUST obtain explicit user confirmation before invoking this method.
-         */
-        fun sendAuthorizedReply(
-            context: Context,
-            notificationKey: String,
-            replyText: String
-        ): Result<String> {
-            val action = replyActions[notificationKey]
-                ?: return Result.failure(IllegalStateException("No active reply handle for this notification."))
-            val remoteInputs = action.remoteInputs
-            if (remoteInputs.isNullOrEmpty()) {
-                return Result.failure(IllegalStateException("Notification does not expose RemoteInput."))
-            }
-
-            return try {
-                val intent = Intent()
-                val resultsBundle = Bundle()
-                remoteInputs.forEach { ri ->
-                    resultsBundle.putCharSequence(ri.resultKey, replyText)
-                }
-                RemoteInput.addResultsToIntent(remoteInputs, intent, resultsBundle)
-                action.actionIntent.send(context, 0, intent)
-                Result.success("Reply delivered cleanly.")
-            } catch (e: PendingIntent.CanceledException) {
-                Result.failure(IllegalStateException("Notification expired before reply could be sent.", e))
-            } catch (e: Exception) {
-                Result.failure(e)
-            }
+            return AutomationOutcome(false, "No inline RemoteInput reply field found on that notification.")
         }
     }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
         instance = this
-        refreshActiveNotifications()
-    }
-
-    override fun onNotificationPosted(sbn: StatusBarNotification?) {
-        refreshActiveNotifications()
-    }
-
-    override fun onNotificationRemoved(sbn: StatusBarNotification?) {
-        refreshActiveNotifications()
+        _isConnected.value = true
+        refreshActive()
     }
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
         if (instance === this) instance = null
+        _isConnected.value = false
     }
 
-    private fun refreshActiveNotifications() {
-        try {
-            val active = activeNotifications ?: return
-            replyActions.clear()
+    override fun onNotificationPosted(sbn: StatusBarNotification?) {
+        refreshActive()
+    }
 
-            val packagesWithChildItems = active
-                .filter { ((it.notification?.flags ?: 0) and Notification.FLAG_GROUP_SUMMARY) == 0 }
-                .map { it.packageName }
-                .toSet()
+    override fun onNotificationRemoved(sbn: StatusBarNotification?) {
+        refreshActive()
+    }
 
-            val mapped = active.mapNotNull { sbn ->
-                val notification = sbn.notification ?: return@mapNotNull null
-                val isGroupSummary = (notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0
-                if (isGroupSummary && packagesWithChildItems.contains(sbn.packageName)) {
-                    return@mapNotNull null
-                }
-
-                val extras = notification.extras ?: Bundle.EMPTY
-                val (title, text) = extractSenderAndMessage(sbn.packageName, extras)
-                if (title.isBlank() && text.isBlank()) return@mapNotNull null
-
-                val replyAction = notification.actions?.firstOrNull { act ->
-                    !act.remoteInputs.isNullOrEmpty()
-                }
-                if (replyAction != null) {
-                    replyActions[sbn.key] = replyAction
-                }
-
-                val isWa = WHATSAPP_PACKAGES.contains(sbn.packageName)
+    private fun refreshActive() {
+        val list = try {
+            activeNotifications?.mapNotNull { sbn ->
+                if (sbn.packageName == packageName) return@mapNotNull null
+                val extras = sbn.notification?.extras ?: return@mapNotNull null
+                val title = extras.getCharSequence("android.title")?.toString().orEmpty()
+                val rawBody = extras.getCharSequence("android.bigText")?.toString()
+                    ?: extras.getCharSequence("android.text")?.toString().orEmpty()
+                val safeBody = NotificationUnderstandingManager.redactSensitiveText(rawBody)
+                val hasReply = sbn.notification?.actions?.any { !it.remoteInputs.isNullOrEmpty() } == true
                 CapturedNotification(
                     key = sbn.key,
                     packageName = sbn.packageName,
-                    appLabel = if (isWa) "WhatsApp" else sbn.packageName.substringAfterLast("."),
-                    senderTitle = title,
-                    messageText = text,
+                    appLabel = sbn.packageName.substringAfterLast('.').replaceFirstChar { it.uppercase() },
+                    sender = title.ifBlank { sbn.packageName.substringAfterLast('.') },
+                    bodyRedacted = safeBody,
                     timestampMs = sbn.postTime,
-                    isWhatsApp = isWa,
-                    canReply = replyAction != null
+                    hasReplyAction = hasReply
                 )
-            }.sortedByDescending { it.timestampMs }.take(25)
-
-            _notifications.value = mapped
+            }.orEmpty().sortedByDescending { it.timestampMs }.take(40)
         } catch (_: Exception) {
+            emptyList()
         }
+        _notifications.value = list
     }
 }

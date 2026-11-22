@@ -5,243 +5,225 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
-import android.graphics.RectF
-import android.graphics.Typeface
 import android.util.Base64
-import com.example.api.AiProvider
-import com.example.api.ProviderClient
-import com.example.vision.VisionBitmapUtils
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.TimeUnit
 
-data class SetOfMarkAnnotatedResult(
-    val jpegBytes: ByteArray,
-    val markMap: Map<Int, ScreenElementNode>,
-    val scaledWidth: Int,
-    val scaledHeight: Int
+data class GroundingPoint(
+    val x: Float,
+    val y: Float,
+    val confidence: Float = 0.8f,
+    val label: String = "",
+    val providerName: String = "gemini"
 )
 
-object SetOfMarkGrounding {
-
-    /**
-     * Scales a screenshot down cleanly and masks any password fields with solid black boxes
-     * so no password text or visual keyboard digits ever leave the device.
-     */
-    fun redactPasswordsToJpeg(
-        bitmap: Bitmap,
-        snapshot: ScreenSnapshot,
-        screenWidth: Int,
-        screenHeight: Int,
-        maxDim: Int = 768,
-        quality: Int = 70
-    ): ByteArray {
-        val scaled = VisionBitmapUtils.scaleDown(bitmap, maxDim)
-        val mutable = scaled.copy(Bitmap.Config.ARGB_8888, true)
-        drawPasswordMasks(mutable, snapshot.elements, screenWidth, screenHeight)
-        val out = ByteArrayOutputStream()
-        mutable.compress(Bitmap.CompressFormat.JPEG, quality, out)
-        return out.toByteArray()
-    }
-
-    /**
-     * Draws Set-of-Mark numbered badges [1], [2]... over clickable/editable elements (max 35)
-     * after masking any password regions, and returns JPEG bytes + badge index mapping.
-     */
-    fun annotateSnapshot(
-        bitmap: Bitmap,
-        snapshot: ScreenSnapshot,
-        screenWidth: Int,
-        screenHeight: Int,
-        maxDim: Int = 768,
-        quality: Int = 75
-    ): SetOfMarkAnnotatedResult {
-        val scaled = VisionBitmapUtils.scaleDown(bitmap, maxDim)
-        val mutable = scaled.copy(Bitmap.Config.ARGB_8888, true)
-        drawPasswordMasks(mutable, snapshot.elements, screenWidth, screenHeight)
-
-        val canvas = Canvas(mutable)
-        val scaleX = mutable.width.toFloat() / screenWidth.coerceAtLeast(1)
-        val scaleY = mutable.height.toFloat() / screenHeight.coerceAtLeast(1)
-
-        val candidates = snapshot.elements
-            .filter { !it.isPassword && (it.isClickable || it.isEditable || it.region != "content") }
-            .ifEmpty { snapshot.elements.filter { !it.isPassword } }
-            .take(35)
-
-        val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 2.5f
-        }
-        val badgeBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL
-        }
-        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 18f
-            typeface = Typeface.DEFAULT_BOLD
-            textAlign = Paint.Align.CENTER
-        }
-
-        val markMap = LinkedHashMap<Int, ScreenElementNode>(candidates.size)
-        candidates.forEachIndexed { idx, el ->
-            val markNumber = idx + 1
-            markMap[markNumber] = el
-
-            val left = (el.bounds.left * scaleX).coerceIn(2f, mutable.width - 12f)
-            val top = (el.bounds.top * scaleY).coerceIn(2f, mutable.height - 12f)
-            val right = (el.bounds.right * scaleX).coerceIn(left + 8f, mutable.width - 2f)
-            val bottom = (el.bounds.bottom * scaleY).coerceIn(top + 8f, mutable.height - 2f)
-
-            val accent = if (el.isEditable) Color.parseColor("#FFFF2A85") else Color.parseColor("#FF00E5FF")
-            boxPaint.color = accent
-            badgeBgPaint.color = Color.parseColor("#DC0A1020")
-
-            canvas.drawRect(left, top, right, bottom, boxPaint)
-
-            val label = markNumber.toString()
-            val pillW = if (markNumber >= 10) 32f else 24f
-            val pillH = 22f
-            val pillRect = RectF(left, (top - 2f).coerceAtLeast(0f), (left + pillW).coerceAtMost(mutable.width.toFloat()), ((top - 2f).coerceAtLeast(0f) + pillH).coerceAtMost(mutable.height.toFloat()))
-            canvas.drawRoundRect(pillRect, 6f, 6f, badgeBgPaint)
-            boxPaint.color = accent
-            canvas.drawRoundRect(pillRect, 6f, 6f, boxPaint)
-            canvas.drawText(label, pillRect.centerX(), pillRect.centerY() + 6f, textPaint)
-        }
-
-        val out = ByteArrayOutputStream()
-        mutable.compress(Bitmap.CompressFormat.JPEG, quality, out)
-        return SetOfMarkAnnotatedResult(
-            jpegBytes = out.toByteArray(),
-            markMap = markMap,
-            scaledWidth = mutable.width,
-            scaledHeight = mutable.height
-        )
-    }
-
-    private fun drawPasswordMasks(
-        mutableBitmap: Bitmap,
-        elements: List<ScreenElementNode>,
+interface GuiGroundingProvider {
+    val providerName: String
+    suspend fun groundTarget(
+        screenshotJpeg: ByteArray,
+        targetQuery: String,
         screenWidth: Int,
         screenHeight: Int
-    ) {
-        val pwdElements = elements.filter { it.isPassword }
-        if (pwdElements.isEmpty()) return
-        val canvas = Canvas(mutableBitmap)
-        val maskPaint = Paint().apply {
+    ): GroundingPoint?
+}
+
+class GeminiGroundingProvider(
+    private val apiKey: String,
+    private val modelId: String = "gemini-2.5-flash",
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
+        .build()
+) : GuiGroundingProvider {
+    override val providerName: String = "Gemini Vision SoM"
+
+    override suspend fun groundTarget(
+        screenshotJpeg: ByteArray,
+        targetQuery: String,
+        screenWidth: Int,
+        screenHeight: Int
+    ): GroundingPoint? {
+        if (apiKey.isBlank() || screenshotJpeg.isEmpty()) return null
+        return try {
+            val b64 = Base64.encodeToString(screenshotJpeg, Base64.NO_WRAP)
+            val prompt = "Locate UI element matching: '$targetQuery' on this ${screenWidth}x${screenHeight} screenshot. " +
+                "Return strict JSON only: {\"x\": <pixel_x>, \"y\": <pixel_y>, \"confidence\": <0..1>, \"label\": \"...\"}"
+            val payload = JSONObject().apply {
+                put(
+                    "contents",
+                    JSONArray().put(
+                        JSONObject().put(
+                            "parts",
+                            JSONArray()
+                                .put(JSONObject().put("text", prompt))
+                                .put(
+                                    JSONObject().put(
+                                        "inlineData",
+                                        JSONObject().put("mimeType", "image/jpeg").put("data", b64)
+                                    )
+                                )
+                        )
+                    )
+                )
+            }
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelId:generateContent"
+            val req = Request.Builder()
+                .url(url)
+                .header("x-goog-api-key", apiKey)
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val raw = resp.body?.string().orEmpty()
+                val text = JSONObject(raw)
+                    .optJSONArray("candidates")?.optJSONObject(0)
+                    ?.optJSONObject("content")?.optJSONArray("parts")?.optJSONObject(0)
+                    ?.optString("text").orEmpty()
+                SetOfMarkGrounding.parseSetOfMarkResponse(text, providerName)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+}
+
+class RemoteHttpGroundingProvider(
+    private val endpointUrl: String,
+    private val bearerToken: String,
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
+        .build()
+) : GuiGroundingProvider {
+    override val providerName: String = "Remote HTTP Grounding"
+
+    override suspend fun groundTarget(
+        screenshotJpeg: ByteArray,
+        targetQuery: String,
+        screenWidth: Int,
+        screenHeight: Int
+    ): GroundingPoint? {
+        if (!endpointUrl.startsWith("https://")) return null
+        return try {
+            val payload = JSONObject().apply {
+                put("query", targetQuery)
+                put("width", screenWidth)
+                put("height", screenHeight)
+                put("image_base64", Base64.encodeToString(screenshotJpeg, Base64.NO_WRAP))
+            }
+            val builder = Request.Builder()
+                .url(endpointUrl)
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+            if (bearerToken.isNotBlank()) {
+                builder.header("Authorization", "Bearer $bearerToken")
+            }
+            httpClient.newCall(builder.build()).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val raw = resp.body?.string().orEmpty()
+                SetOfMarkGrounding.parseSetOfMarkResponse(raw, providerName)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+}
+
+class CompositeGuiGroundingProvider(
+    private val providers: List<GuiGroundingProvider>
+) : GuiGroundingProvider {
+    override val providerName: String = "Composite Grounding"
+
+    override suspend fun groundTarget(
+        screenshotJpeg: ByteArray,
+        targetQuery: String,
+        screenWidth: Int,
+        screenHeight: Int
+    ): GroundingPoint? {
+        for (provider in providers) {
+            val hit = provider.groundTarget(screenshotJpeg, targetQuery, screenWidth, screenHeight)
+            if (hit != null && hit.x > 0f && hit.y > 0f) return hit
+        }
+        return null
+    }
+}
+
+object SetOfMarkGrounding {
+    fun isThinAccessibilityTree(snapshot: ScreenSnapshot): Boolean {
+        return snapshot.elements.count { it.isClickable || it.isEditable } < 2
+    }
+
+    fun redactPasswordsToJpeg(bitmap: Bitmap, snapshot: ScreenSnapshot): ByteArray {
+        val copy = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(copy)
+        val blackPaint = Paint().apply {
             color = Color.BLACK
             style = Paint.Style.FILL
         }
-        val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.LTGRAY
-            textSize = 14f
-            textAlign = Paint.Align.CENTER
+        snapshot.elements.filter { it.isPassword }.forEach { pwd ->
+            canvas.drawRect(Rect(pwd.bounds), blackPaint)
         }
-        val sx = mutableBitmap.width.toFloat() / screenWidth.coerceAtLeast(1)
-        val sy = mutableBitmap.height.toFloat() / screenHeight.coerceAtLeast(1)
-        pwdElements.forEach { el ->
-            val r = Rect(
-                (el.bounds.left * sx).toInt().coerceIn(0, mutableBitmap.width),
-                (el.bounds.top * sy).toInt().coerceIn(0, mutableBitmap.height),
-                (el.bounds.right * sx).toInt().coerceIn(0, mutableBitmap.width),
-                (el.bounds.bottom * sy).toInt().coerceIn(0, mutableBitmap.height)
+        val out = ByteArrayOutputStream()
+        copy.compress(Bitmap.CompressFormat.JPEG, 78, out)
+        return out.toByteArray()
+    }
+
+    fun annotateSnapshot(bitmap: Bitmap, snapshot: ScreenSnapshot): Bitmap {
+        val annotated = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(annotated)
+        val boxPaint = Paint().apply {
+            color = Color.CYAN
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+        }
+        val badgePaint = Paint().apply {
+            color = Color.MAGENTA
+            style = Paint.Style.FILL
+        }
+        val textPaint = Paint().apply {
+            color = Color.WHITE
+            textSize = 26f
+            isFakeBoldText = true
+        }
+        val blackPaint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL }
+
+        snapshot.elements.take(40).forEach { el ->
+            if (el.isPassword) {
+                canvas.drawRect(el.bounds, blackPaint)
+            } else {
+                canvas.drawRect(el.bounds, boxPaint)
+                val bx = el.bounds.left.toFloat().coerceAtLeast(4f)
+                val by = el.bounds.top.toFloat().coerceAtLeast(32f)
+                canvas.drawRect(bx, by - 28f, bx + 44f, by, badgePaint)
+                canvas.drawText(el.index.toString(), bx + 8f, by - 6f, textPaint)
+            }
+        }
+        return annotated
+    }
+
+    fun parseSetOfMarkResponse(rawText: String, providerName: String = "SoM"): GroundingPoint? {
+        val start = rawText.indexOf('{')
+        val end = rawText.lastIndexOf('}')
+        if (start < 0 || end <= start) return null
+        return try {
+            val obj = JSONObject(rawText.substring(start, end + 1))
+            val x = obj.optDouble("x", Double.NaN).toFloat()
+            val y = obj.optDouble("y", Double.NaN).toFloat()
+            if (x.isNaN() || y.isNaN()) return null
+            GroundingPoint(
+                x = x,
+                y = y,
+                confidence = obj.optDouble("confidence", 0.8).toFloat().coerceIn(0f, 1f),
+                label = obj.optString("label"),
+                providerName = providerName
             )
-            if (!r.isEmpty) {
-                canvas.drawRect(r, maskPaint)
-                canvas.drawText("PASSWORD", r.exactCenterX(), r.exactCenterY() + 4f, labelPaint)
-            }
+        } catch (_: Exception) {
+            null
         }
-    }
-
-    fun parseSetOfMarkResponse(
-        raw: String,
-        markMap: Map<Int, ScreenElementNode>,
-        screenWidth: Int,
-        screenHeight: Int,
-        providerName: String
-    ): GroundingPoint? {
-        val start = raw.indexOf('{')
-        val end = raw.lastIndexOf('}')
-        if (start >= 0 && end > start) {
-            try {
-                val obj = JSONObject(raw.substring(start, end + 1))
-                val idx = obj.optInt("index", obj.optInt("mark", obj.optInt("box", -1)))
-                val matchedNode = markMap[idx]
-                if (matchedNode != null) {
-                    val xPx = matchedNode.centerX.toFloat().coerceIn(4f, screenWidth - 4f)
-                    val yPx = matchedNode.centerY.toFloat().coerceIn(4f, screenHeight - 4f)
-                    return GroundingPoint(
-                        xPx = xPx,
-                        yPx = yPx,
-                        xNorm = xPx / screenWidth.coerceAtLeast(1),
-                        yNorm = yPx / screenHeight.coerceAtLeast(1),
-                        providerName = "$providerName [SoM #$idx]",
-                        rawResponse = raw.take(180)
-                    )
-                }
-            } catch (_: Exception) {
-            }
-        }
-        return GuiGroundingParser.parsePoint(raw, screenWidth, screenHeight, "$providerName [SoM]")
-    }
-
-    suspend fun locateTarget(
-        bitmap: Bitmap,
-        snapshot: ScreenSnapshot,
-        targetDescription: String,
-        screenWidth: Int,
-        screenHeight: Int,
-        fallbackGrounding: GuiGroundingProvider,
-        providerClient: ProviderClient,
-        provider: AiProvider?,
-        apiKey: String?,
-        model: String?,
-        baseUrl: String?
-    ): Result<GroundingPoint> {
-        val annotated = annotateSnapshot(bitmap, snapshot, screenWidth, screenHeight)
-        if (provider != null && !apiKey.isNullOrBlank() && !model.isNullOrBlank() && !baseUrl.isNullOrBlank()) {
-            try {
-                val b64 = Base64.encodeToString(annotated.jpegBytes, Base64.NO_WRAP)
-                val markSummary = annotated.markMap.entries.take(25).joinToString(", ") { (k, v) ->
-                    "[$k]=${v.bestLabel.ifBlank { v.className }.take(24)}"
-                }
-                val reply = providerClient.analyzeImageWithProvider(
-                    provider = provider,
-                    apiKey = apiKey,
-                    model = model,
-                    baseUrl = baseUrl,
-                    base64Jpeg = b64,
-                    systemPrompt = """
-You are a precise Android Set-of-Mark GUI grounding assistant.
-The screenshot has numbered boxes [1], [2], ... drawn over UI controls.
-If one of the numbered boxes matches the target, return ONLY: {"index": N}
-If the target has no numbered box, return ONLY: {"point":[y,x]} with y,x normalized 0..1000.
-Do not add prose.
-                    """.trimIndent(),
-                    userPrompt = "Target: $targetDescription\nBoxes: $markSummary"
-                )
-                parseSetOfMarkResponse(
-                    raw = reply,
-                    markMap = annotated.markMap,
-                    screenWidth = screenWidth,
-                    screenHeight = screenHeight,
-                    providerName = provider.shortName
-                )?.let { return Result.success(it) }
-            } catch (_: Exception) {
-            }
-        }
-        return fallbackGrounding.locateTarget(annotated.jpegBytes, targetDescription, screenWidth, screenHeight)
-    }
-
-    fun isThinAccessibilityTree(snapshot: ScreenSnapshot): Boolean {
-        val meaningful = snapshot.elements.count {
-            !it.isPassword && (it.bestLabel.isNotBlank() || it.isClickable || it.isEditable)
-        }
-        val unlabeledClickables = snapshot.elements.count { it.isClickable && it.bestLabel.isBlank() }
-        val isWebOrCanvas = snapshot.elements.any {
-            it.className.contains("WebView", ignoreCase = true) ||
-                it.className.contains("SurfaceView", ignoreCase = true) ||
-                it.className.contains("Flutter", ignoreCase = true)
-        }
-        return meaningful < 8 || (isWebOrCanvas && meaningful < 14) || (unlabeledClickables >= 4 && meaningful < 10)
     }
 }

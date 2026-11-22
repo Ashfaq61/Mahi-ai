@@ -1,13 +1,8 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
--->
+<?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <exclude domain="sharedpref" path="mahi_secure_api_keys.xml" />
+    <exclude domain="sharedpref" path="mahi_preferences_store.xml" />
+    <exclude domain="file" path="user_memory.json" />
+    <exclude domain="file" path="app_label_memory.json" />
+    <exclude domain="database" path="mahi_ai_database" />
 </full-backup-content>

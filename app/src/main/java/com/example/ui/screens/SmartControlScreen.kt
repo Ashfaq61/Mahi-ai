@@ -1,24 +1,13 @@
 package com.example.ui.screens
 
-import android.Manifest
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.net.Uri
-import android.os.Build
-import android.provider.Settings
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,58 +16,27 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.filled.BatteryChargingFull
-import androidx.compose.material.icons.filled.Brightness6
-import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.FlashlightOff
 import androidx.compose.material.icons.filled.FlashlightOn
-import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.SmartToy
-import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.Wifi
-import com.example.ui.components.ScreenDoctorModal
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
-import com.example.automation.MahiAccessibilityService
-import com.example.automation.MahiNotificationService
 import com.example.control.AllVolumeLevels
 import com.example.control.BatteryInfoSnapshot
 import com.example.control.DeviceInfoSnapshot
@@ -89,7 +47,6 @@ import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.CyberEmerald
 import com.example.ui.theme.NeonMagenta
 import com.example.ui.theme.NeonViolet
-import com.example.ui.theme.WarningAmber
 
 @Composable
 fun SmartControlScreen(
@@ -102,8 +59,6 @@ fun SmartControlScreen(
     networkInfo: NetworkInfoSnapshot,
     deviceInfo: DeviceInfoSnapshot,
     lastControlStatus: String,
-    autopilotEnabled: Boolean = false,
-    onToggleAutopilot: (Boolean) -> Unit = {},
     onBack: () -> Unit,
     onRefreshAll: () -> Unit,
     onLaunchApp: (String) -> Unit,
@@ -115,580 +70,173 @@ fun SmartControlScreen(
     onOpenMobileDataSettings: () -> Unit,
     onOpenAirplaneSettings: () -> Unit,
     onOpenNfcPanel: () -> Unit,
-    onToggleFlashlight: (Boolean) -> Unit,
+    onToggleFlashlight: () -> Unit,
     onSetVolumeStream: (VolumeStreamType, Int) -> Unit,
-    onToggleMuteMedia: (Boolean) -> Unit,
+    onToggleMuteMedia: () -> Unit,
     onSetBrightness: (Int) -> Unit,
     onOpenWriteSettings: () -> Unit,
     onOpenDndSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
     val colors = MaterialTheme.colorScheme
-    var appQuery by remember { mutableStateOf("") }
-    var permTick by remember { mutableIntStateOf(0) }
-    var showScreenDoctor by remember { mutableStateOf(false) }
-
-    if (showScreenDoctor) {
-        ScreenDoctorModal(
-            onDismiss = { showScreenDoctor = false },
-            onOpenPlayground = { showScreenDoctor = false }
-        )
-    }
-
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                permTick++
-                onRefreshAll()
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    val runtimePermLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        permTick++
-        onRefreshAll()
-    }
-
-    val isAccessibilityOn = remember(permTick) { MahiAccessibilityService.isServiceEnabled(context) }
-    val isNotificationsOn = remember(permTick) { MahiNotificationService.isListenerEnabled(context) }
-    val hasMicPerm = remember(permTick) {
-        ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-    }
-    val hasCameraPerm = remember(permTick) {
-        ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-    }
-    val hasPhonePerm = remember(permTick) {
-        ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
-    }
-    val hasPostNotifPerm = remember(permTick) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
-    }
-
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(colors.background)
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
             .testTag("smart_control_screen"),
         verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        // Header
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = onBack,
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .testTag("smart_control_back_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint = CyberCyan
-                    )
-                }
-                Column {
-                    Text(
-                        text = "SMARTPHONE CONTROL",
-                        color = CyberCyan,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Black,
-                        letterSpacing = 1.sp
-                    )
-                    Text(
-                        text = "Smart Smartphone Control",
-                        color = colors.onBackground,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            IconButton(
-                onClick = {
-                    permTick++
-                    onRefreshAll()
-                },
-                modifier = Modifier
-                    .minimumInteractiveComponentSize()
-                    .testTag("smart_control_refresh_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Refresh,
-                    contentDescription = "Refresh Live Telemetry",
-                    tint = NeonMagenta
-                )
-            }
-        }
-
-        if (lastControlStatus.isNotBlank()) {
-            Text(
-                text = lastControlStatus,
-                color = CyberCyan,
-                fontSize = 12.sp,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(colors.surfaceVariant)
-                    .padding(10.dp)
-            )
-        }
-
-        // 1. App Control Card
-        ControlCard(
-            title = "App Control",
-            subtitle = "Launch installed Android apps cleanly",
-            badgeText = "READY",
-            badgeColor = CyberEmerald,
-            icon = Icons.Default.PhoneAndroid
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedTextField(
-                    value = appQuery,
-                    onValueChange = { appQuery = it },
-                    placeholder = { Text("App name (WhatsApp, YouTube…)", fontSize = 12.sp) },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f)
-                )
-                Button(
-                    onClick = {
-                        if (appQuery.isNotBlank()) onLaunchApp(appQuery.trim())
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = NeonMagenta)
-                ) {
-                    Text("Open", fontSize = 12.sp)
-                }
-            }
-        }
-
-        // 2. Screen Automation Card (links to existing Agent Automation screen without duplicating it)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(16.dp))
-                .background(colors.surface)
-                .border(1.dp, colors.outline, RoundedCornerShape(16.dp))
-                .clickable { onNavigateToAgent() }
-                .padding(14.dp)
-                .testTag("smart_control_open_agent_card"),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                Icon(Icons.Default.SmartToy, contentDescription = null, tint = NeonViolet, modifier = Modifier.size(22.dp))
-                Spacer(modifier = Modifier.width(12.dp))
-                Column {
-                    Text("Screen Automation", color = colors.onSurface, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                    Text(
-                        text = if (isAccessibilityOn) "Accessibility ON • Open Agent Screen" else "Accessibility OFF • Open Agent Setup",
-                        color = if (isAccessibilityOn) CyberEmerald else WarningAmber,
-                        fontSize = 12.sp
-                    )
-                }
-            }
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Go to Agent", tint = CyberCyan)
-        }
-
-        // 2a. Screen Doctor Diagnostics Card
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(16.dp))
-                .background(colors.surface)
-                .border(1.dp, CyberCyan.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
-                .clickable { showScreenDoctor = true }
-                .padding(14.dp)
-                .testTag("smart_control_screen_doctor_card"),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                Icon(Icons.Default.Build, contentDescription = null, tint = CyberCyan, modifier = Modifier.size(22.dp))
-                Spacer(modifier = Modifier.width(12.dp))
-                Column {
-                    Text("Screen Doctor", color = colors.onSurface, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                    Text(
-                        text = "Live Accessibility diagnostics, countdown check, Playground & Copy Report",
-                        color = colors.onSurfaceVariant,
-                        fontSize = 12.sp
-                    )
-                }
-            }
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Open Screen Doctor", tint = CyberCyan)
-        }
-
-        // 2b. Allow Autopilot Toggle Shortcut
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(16.dp))
-                .background(colors.surface)
-                .border(
-                    1.dp,
-                    if (autopilotEnabled) NeonViolet.copy(alpha = 0.6f) else colors.outline,
-                    RoundedCornerShape(16.dp)
-                )
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
-                Text("Allow Autopilot", color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                Text(
-                    text = if (autopilotEnabled) {
-                        "ON — Cross-app tap, scroll & comment steps enabled"
-                    } else {
-                        "OFF — Enable to let Mahi control third-party apps"
-                    },
-                    color = if (autopilotEnabled) CyberEmerald else colors.onSurfaceVariant,
-                    fontSize = 11.sp
-                )
-            }
-            Switch(
-                checked = autopilotEnabled,
-                onCheckedChange = onToggleAutopilot,
-                colors = SwitchDefaults.colors(checkedTrackColor = NeonViolet),
-                modifier = Modifier.testTag("smart_control_autopilot_switch")
-            )
-        }
-
-        // 3. Quick Settings Card
-        ControlCard(
-            title = "Quick Settings & System Panels",
-            subtitle = "Android 10+ blocks silent Wi-Fi/Data toggles, so Mahi opens official panels",
-            badgeText = if (isAccessibilityOn) "SHADE ON" else "PANELS",
-            badgeColor = CyberCyan,
-            icon = Icons.Default.Tune
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onOpenQuickSettingsShade, modifier = Modifier.weight(1f)) {
-                        Text("Quick Settings", fontSize = 11.sp)
-                    }
-                    OutlinedButton(onClick = onOpenNotificationShade, modifier = Modifier.weight(1f)) {
-                        Text("Notifications", fontSize = 11.sp)
-                    }
-                }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onOpenWifiPanel, modifier = Modifier.weight(1f)) {
-                        Text("Wi-Fi Panel", fontSize = 11.sp)
-                    }
-                    OutlinedButton(onClick = onOpenBluetoothPanel, modifier = Modifier.weight(1f)) {
-                        Text("Bluetooth", fontSize = 11.sp)
-                    }
-                    OutlinedButton(onClick = onOpenMobileDataSettings, modifier = Modifier.weight(1f)) {
-                        Text("Mobile Data", fontSize = 11.sp)
-                    }
-                }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onOpenAirplaneSettings, modifier = Modifier.weight(1f)) {
-                        Text("Airplane Mode", fontSize = 11.sp)
-                    }
-                    OutlinedButton(onClick = onOpenNfcPanel, modifier = Modifier.weight(1f)) {
-                        Text("NFC Panel", fontSize = 11.sp)
-                    }
-                }
-            }
-        }
-
-        // 4. Flashlight Card
-        ControlCard(
-            title = "Flashlight",
-            subtitle = if (isFlashlightOn) "Hardware torch active" else "Torch off",
-            badgeText = if (isFlashlightOn) "ON" else "OFF",
-            badgeColor = if (isFlashlightOn) CyberEmerald else colors.onSurfaceVariant,
-            icon = Icons.Default.FlashlightOn
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Rear Camera Torch", color = colors.onSurface, fontSize = 13.sp)
-                Switch(
-                    checked = isFlashlightOn,
-                    onCheckedChange = onToggleFlashlight,
-                    colors = SwitchDefaults.colors(checkedTrackColor = NeonMagenta),
-                    modifier = Modifier.testTag("smart_control_flashlight_switch")
-                )
-            }
-        }
-
-        // 5. Volume Card (All 5 streams + Mute + DND check)
-        ControlCard(
-            title = "Volume (All Streams)",
-            subtitle = "Ringer: ${volumeLevels.ringerMode} • DND Access: ${if (volumeLevels.hasDndPolicyAccess) "Granted" else "Not Granted"}",
-            badgeText = "${volumeLevels.mediaPercent}%",
-            badgeColor = NeonMagenta,
-            icon = Icons.AutoMirrored.Filled.VolumeUp
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                VolumeSliderRow("Media", volumeLevels.mediaPercent) { onSetVolumeStream(VolumeStreamType.MEDIA, it) }
-                VolumeSliderRow("Ringtone", volumeLevels.ringtonePercent) { onSetVolumeStream(VolumeStreamType.RINGTONE, it) }
-                VolumeSliderRow("Notification", volumeLevels.notificationPercent) { onSetVolumeStream(VolumeStreamType.NOTIFICATION, it) }
-                VolumeSliderRow("Alarm", volumeLevels.alarmPercent) { onSetVolumeStream(VolumeStreamType.ALARM, it) }
-                VolumeSliderRow("Voice Call", volumeLevels.callPercent) { onSetVolumeStream(VolumeStreamType.CALL, it) }
-
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = { onToggleMuteMedia(!volumeLevels.isMediaMuted) },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(if (volumeLevels.isMediaMuted) "Unmute Media" else "Mute Media", fontSize = 12.sp)
-                    }
-                    if (!volumeLevels.hasDndPolicyAccess) {
-                        OutlinedButton(onClick = onOpenDndSettings, modifier = Modifier.weight(1f)) {
-                            Text("Grant DND Access", fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-        }
-
-        // 6. Brightness Card
-        ControlCard(
-            title = "Screen Brightness",
-            subtitle = if (canWriteSettings) "Manual system brightness write active" else "Needs Modify System Settings permission",
-            badgeText = if (canWriteSettings) "$brightnessPercent%" else "NEEDS PERM",
-            badgeColor = if (canWriteSettings) CyberCyan else WarningAmber,
-            icon = Icons.Default.Brightness6
-        ) {
-            Column {
-                Slider(
-                    value = brightnessPercent.toFloat(),
-                    onValueChange = { onSetBrightness(it.toInt()) },
-                    valueRange = 5f..100f,
-                    colors = SliderDefaults.colors(thumbColor = CyberCyan, activeTrackColor = CyberCyan)
-                )
-                if (!canWriteSettings) {
-                    OutlinedButton(onClick = onOpenWriteSettings) {
-                        Text("Allow Modify System Settings", fontSize = 12.sp)
-                    }
-                }
-            }
-        }
-
-        // 7. Battery Card
-        ControlCard(
-            title = "Battery Information",
-            subtitle = "${batteryInfo.chargeSource} • ${String.format("%.1f", batteryInfo.temperatureCelsius)}°C • ${String.format("%.2f", batteryInfo.voltageVolts)}V • Health: ${batteryInfo.healthLabel}",
-            badgeText = "${batteryInfo.levelPercent}%",
-            badgeColor = if (batteryInfo.levelPercent > 20) CyberEmerald else WarningAmber,
-            icon = Icons.Default.BatteryChargingFull
-        ) {
-            Text(batteryInfo.statusSummary, color = colors.onSurfaceVariant, fontSize = 12.sp)
-        }
-
-        // 8. Storage Card
-        ControlCard(
-            title = "Internal Storage",
-            subtitle = String.format("%.1f GB free / %.1f GB total", storageInfo.freeGb, storageInfo.totalGb),
-            badgeText = "${storageInfo.usedPercent}% USED",
-            badgeColor = NeonViolet,
-            icon = Icons.Default.Storage
-        ) {
-            Text(storageInfo.summary, color = colors.onSurfaceVariant, fontSize = 12.sp)
-        }
-
-        // 9. Network Card
-        ControlCard(
-            title = "Network & Connectivity",
-            subtitle = networkInfo.wifiSsidOrNote.ifBlank { networkInfo.transportLabel },
-            badgeText = if (networkInfo.isConnected) networkInfo.transportLabel.uppercase() else "OFFLINE",
-            badgeColor = if (networkInfo.isConnected) CyberEmerald else WarningAmber,
-            icon = Icons.Default.Wifi
-        ) {
-            Text(networkInfo.summary, color = colors.onSurfaceVariant, fontSize = 12.sp)
-        }
-
-        // 10. Device Info Card
-        ControlCard(
-            title = "Device Information",
-            subtitle = "${deviceInfo.androidVersion} • Uptime ${deviceInfo.uptimeFormatted}",
-            badgeText = "API ${deviceInfo.sdkInt}",
-            badgeColor = CyberCyan,
-            icon = Icons.Default.Settings
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("Model: ${deviceInfo.manufacturerModel}", color = colors.onSurface, fontSize = 12.sp)
-                Text(
-                    text = String.format("RAM: %.1f GB free / %.1f GB total • Patch: %s", deviceInfo.availRamGb, deviceInfo.totalRamGb, deviceInfo.securityPatch),
-                    color = colors.onSurfaceVariant,
-                    fontSize = 12.sp
-                )
-            }
-        }
-
-        // 11. Permission Status Card
-        ControlCard(
-            title = "Permission Status",
-            subtitle = "Every automation capability is strictly permission-gated",
-            badgeText = "SECURITY",
-            badgeColor = NeonMagenta,
-            icon = Icons.Default.Security
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                PermissionRow("Accessibility Service", isAccessibilityOn) {
-                    MahiAccessibilityService.openAccessibilitySettings(context)
-                }
-                PermissionRow("Notification Listener", isNotificationsOn) {
-                    MahiNotificationService.openNotificationListenerSettings(context)
-                }
-                PermissionRow("Modify System Settings", canWriteSettings) {
-                    onOpenWriteSettings()
-                }
-                PermissionRow("DND Policy Access", volumeLevels.hasDndPolicyAccess) {
-                    onOpenDndSettings()
-                }
-                PermissionRow("Microphone (RECORD_AUDIO)", hasMicPerm) {
-                    runtimePermLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
-                }
-                PermissionRow("Camera (CAMERA)", hasCameraPerm) {
-                    runtimePermLauncher.launch(arrayOf(Manifest.permission.CAMERA))
-                }
-                PermissionRow("Phone (CALL / READ_STATE)", hasPhonePerm) {
-                    runtimePermLauncher.launch(
-                        arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.CALL_PHONE)
-                    )
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    PermissionRow("Notifications (POST_NOTIFICATIONS)", hasPostNotifPerm) {
-                        runtimePermLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
-                    }
-                }
-                OutlinedButton(
-                    onClick = {
-                        context.startActivity(
-                            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                data = Uri.parse("package:${context.packageName}")
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                        )
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Open Android App Info & Battery Settings", fontSize = 12.sp)
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-    }
-}
-
-@Composable
-private fun ControlCard(
-    title: String,
-    subtitle: String,
-    badgeText: String,
-    badgeColor: Color,
-    icon: ImageVector,
-    content: @Composable () -> Unit
-) {
-    val colors = MaterialTheme.colorScheme
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(colors.surface)
-            .border(1.dp, colors.outline, RoundedCornerShape(16.dp))
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                Icon(icon, contentDescription = null, tint = badgeColor, modifier = Modifier.size(20.dp))
-                Spacer(modifier = Modifier.width(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack, modifier = Modifier.minimumInteractiveComponentSize()) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = colors.onBackground)
+                }
                 Column {
-                    Text(title, color = colors.onSurface, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                    Text(subtitle, color = colors.onSurfaceVariant, fontSize = 11.sp)
+                    Text("SMART DEVICE CONTROL", color = CyberCyan, fontSize = 11.sp, fontWeight = FontWeight.Black)
+                    Text("System Hardware & Panels", color = colors.onBackground, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                 }
             }
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(badgeColor.copy(alpha = 0.16f))
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            IconButton(
+                onClick = onRefreshAll,
+                modifier = Modifier.minimumInteractiveComponentSize().testTag("smart_control_refresh_button")
             ) {
-                Text(badgeText, color = badgeColor, fontSize = 10.sp, fontWeight = FontWeight.Black)
+                Icon(Icons.Default.Refresh, contentDescription = "Refresh Telemetry", tint = CyberCyan)
             }
         }
-        content()
-    }
-}
 
-@Composable
-private fun VolumeSliderRow(label: String, percent: Int, onChanged: (Int) -> Unit) {
-    val colors = MaterialTheme.colorScheme
-    Column {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(label, color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-            Text("$percent%", color = CyberCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-        }
-        Slider(
-            value = percent.toFloat(),
-            onValueChange = { onChanged(it.toInt()) },
-            valueRange = 0f..100f,
-            colors = SliderDefaults.colors(thumbColor = NeonMagenta, activeTrackColor = NeonMagenta)
-        )
-    }
-}
-
-@Composable
-private fun PermissionRow(label: String, granted: Boolean, onConfigure: () -> Unit) {
-    val colors = MaterialTheme.colorScheme
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(colors.surfaceVariant)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-            Icon(
-                imageVector = Icons.Default.CheckCircle,
-                contentDescription = null,
-                tint = if (granted) CyberEmerald else WarningAmber,
-                modifier = Modifier.size(16.dp)
+        if (lastControlStatus.isNotBlank()) {
+            Text(
+                text = lastControlStatus,
+                color = CyberEmerald,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(CyberEmerald.copy(alpha = 0.12f))
+                    .padding(10.dp)
             )
-            Spacer(modifier = Modifier.width(8.dp))
-            Column {
-                Text(label, color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                Text(
-                    text = if (granted) "GRANTED / ON" else "OFF / REQUIRED",
-                    color = if (granted) CyberEmerald else WarningAmber,
-                    fontSize = 10.sp
-                )
+        }
+
+        // Live Telemetry Card
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(colors.surface)
+                .border(1.dp, colors.outline, RoundedCornerShape(16.dp))
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text("Live Device Telemetry", color = CyberCyan, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Text("Battery: ${batteryInfo.statusSummary.ifBlank { "${batteryInfo.levelPercent}%" }}", color = colors.onSurface, fontSize = 12.sp)
+            Text("Storage: ${storageInfo.summary}", color = colors.onSurface, fontSize = 12.sp)
+            Text("Network: ${networkInfo.summary}", color = colors.onSurface, fontSize = 12.sp)
+            Text("Device: ${deviceInfo.manufacturerModel} • ${deviceInfo.androidVersion} (SDK ${deviceInfo.sdkInt}) • Up ${deviceInfo.uptimeFormatted}", color = colors.onSurfaceVariant, fontSize = 11.sp)
+        }
+
+        // Flashlight + System Shades
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(colors.surface)
+                .border(1.dp, NeonViolet.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("Hardware & Quick Panels", color = CyberCyan, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = onToggleFlashlight,
+                    colors = ButtonDefaults.buttonColors(containerColor = if (isFlashlightOn) NeonMagenta else colors.surfaceVariant),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(if (isFlashlightOn) Icons.Default.FlashlightOn else Icons.Default.FlashlightOff, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (isFlashlightOn) "Torch ON" else "Torch OFF", fontSize = 11.sp, color = if (isFlashlightOn) Color.White else colors.onSurface)
+                }
+                OutlinedButton(onClick = onOpenQuickSettingsShade, modifier = Modifier.weight(1f)) {
+                    Text("Quick Shade", fontSize = 11.sp)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(onClick = onOpenWifiPanel, modifier = Modifier.weight(1f)) { Text("Wi-Fi", fontSize = 11.sp) }
+                OutlinedButton(onClick = onOpenBluetoothPanel, modifier = Modifier.weight(1f)) { Text("Bluetooth", fontSize = 11.sp) }
+                OutlinedButton(onClick = onOpenMobileDataSettings, modifier = Modifier.weight(1f)) { Text("Data", fontSize = 11.sp) }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(onClick = onOpenNotificationShade, modifier = Modifier.weight(1f)) { Text("Notifs", fontSize = 11.sp) }
+                OutlinedButton(onClick = onOpenAirplaneSettings, modifier = Modifier.weight(1f)) { Text("Airplane", fontSize = 11.sp) }
+                OutlinedButton(onClick = onOpenNfcPanel, modifier = Modifier.weight(1f)) { Text("NFC", fontSize = 11.sp) }
             }
         }
-        OutlinedButton(onClick = onConfigure) {
-            Text(if (granted) "Open" else "Enable", fontSize = 11.sp)
+
+        // Volume & Brightness
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(colors.surface)
+                .border(1.dp, colors.outline, RoundedCornerShape(16.dp))
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Media Volume: ${volumeLevels.mediaPercent}%", color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                OutlinedButton(onClick = onToggleMuteMedia) { Text("Mute/Unmute", fontSize = 10.sp) }
+            }
+            Slider(
+                value = volumeLevels.mediaPercent.toFloat(),
+                onValueChange = { onSetVolumeStream(VolumeStreamType.MEDIA, it.toInt()) },
+                valueRange = 0f..100f
+            )
+            Text("Ringtone Volume: ${volumeLevels.ringtonePercent}%", color = colors.onSurface, fontSize = 12.sp)
+            Slider(
+                value = volumeLevels.ringtonePercent.toFloat(),
+                onValueChange = { onSetVolumeStream(VolumeStreamType.RINGTONE, it.toInt()) },
+                valueRange = 0f..100f
+            )
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Brightness: $brightnessPercent%", color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                if (!canWriteSettings) {
+                    OutlinedButton(onClick = onOpenWriteSettings) { Text("Allow Brightness", fontSize = 10.sp) }
+                }
+            }
+            Slider(
+                value = brightnessPercent.toFloat(),
+                onValueChange = { onSetBrightness(it.toInt()) },
+                valueRange = 5f..100f
+            )
+            OutlinedButton(onClick = onOpenDndSettings, modifier = Modifier.fillMaxWidth()) {
+                Text("Do Not Disturb Permission", fontSize = 11.sp)
+            }
+        }
+
+        // Quick App Launchers
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(colors.surface)
+                .border(1.dp, colors.outline, RoundedCornerShape(16.dp))
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("Quick App Launcher", color = CyberCyan, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(onClick = { onLaunchApp("YouTube") }, modifier = Modifier.weight(1f)) { Text("YouTube", fontSize = 11.sp) }
+                OutlinedButton(onClick = { onLaunchApp("WhatsApp") }, modifier = Modifier.weight(1f)) { Text("WhatsApp", fontSize = 11.sp) }
+                OutlinedButton(onClick = { onLaunchApp("Chrome") }, modifier = Modifier.weight(1f)) { Text("Chrome", fontSize = 11.sp) }
+            }
+            Button(onClick = onNavigateToAgent, modifier = Modifier.fillMaxWidth()) {
+                Text("Open Screen Autopilot Console")
+            }
         }
     }
 }

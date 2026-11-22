@@ -6,131 +6,140 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-enum class AppLanguage(
-    val id: String,
-    val displayName: String,
-    val shortBadge: String,
-    val ttsLanguageTag: String,
-    val instruction: String
-) {
+enum class AppLanguage(val displayName: String, val bcp47: String, val instruction: String) {
     ENGLISH(
-        id = "en",
         displayName = "English",
-        shortBadge = "EN",
-        ttsLanguageTag = "en-US",
-        instruction = "Respond in crisp, natural English."
+        bcp47 = "en-US",
+        instruction = "Respond clearly and naturally in English."
     ),
     ROMAN_URDU(
-        id = "roman_ur",
         displayName = "Roman Urdu",
-        shortBadge = "ROM",
-        ttsLanguageTag = "en-US",
-        instruction = "Respond in natural conversational Roman Urdu (Urdu written in Latin script, e.g. 'Yeh aap ke saamne ek laptop hai')."
+        bcp47 = "ur-PK",
+        instruction = "Respond clearly in natural Roman Urdu / Hinglish (Latin script)."
     ),
     URDU(
-        id = "ur",
-        displayName = "Urdu (اردو)",
-        shortBadge = "اردو",
-        ttsLanguageTag = "ur-PK",
-        instruction = "Respond in fluent, natural Urdu script (اردو)."
-    );
-
-    companion object {
-        fun fromId(id: String?): AppLanguage =
-            entries.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: ENGLISH
-    }
+        displayName = "اردو (Urdu)",
+        bcp47 = "ur-PK",
+        instruction = "Respond clearly in natural Urdu script (اردو)."
+    ),
+    HINDI(
+        displayName = "हिन्दी (Hindi)",
+        bcp47 = "hi-IN",
+        instruction = "Respond clearly in natural Hindi (हिन्दी)."
+    )
 }
 
-enum class AppThemeMode(val id: String, val displayName: String) {
-    DARK("dark", "Cyber Dark"),
-    LIGHT("light", "Luminous Light"),
-    SYSTEM("system", "System");
-
-    companion object {
-        fun fromId(id: String?): AppThemeMode =
-            entries.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: DARK
-    }
+enum class MahiVoiceGender(val displayName: String, val geminiVoiceName: String) {
+    FEMALE("Female (Aoede)", "Aoede"),
+    MALE("Male (Charon)", "Charon")
 }
 
-data class MahiUserPrefs(
+data class MahiUserPreferences(
     val language: AppLanguage = AppLanguage.ENGLISH,
-    val themeMode: AppThemeMode = AppThemeMode.DARK,
-    val autoLanguageDetection: Boolean = true,
-    val pushToTalkMode: Boolean = false,
+    val voiceGender: MahiVoiceGender = MahiVoiceGender.FEMALE,
+    val voicePitch: Float = 1.05f,
+    val voiceSpeed: Float = 1.05f,
+    val ttsClarityCompensation: Boolean = true,
+    val isContinuousMode: Boolean = true,
+    val showSubtitles: Boolean = true,
+    val darkTheme: Boolean = true,
+    val autopilotEnabled: Boolean = false,
     val wakeDetectionEnabled: Boolean = false,
+    val preferGeminiLiveVoice: Boolean = true,
     val memoryConsentGranted: Boolean = false,
-    val autopilotEnabled: Boolean = false
+    val onboardingCompleted: Boolean = false,
+    val lastExternalTargetPackage: String = ""
 )
 
 class MahiPreferencesStore(context: Context) {
     companion object {
-        private const val PREFS_NAME = "mahi_app_prefs"
-        private const val KEY_LANGUAGE = "app_language"
-        private const val KEY_THEME_MODE = "app_theme_mode"
-        private const val KEY_AUTO_LANGUAGE = "auto_language_detection"
-        private const val KEY_PUSH_TO_TALK = "push_to_talk_mode"
-        private const val KEY_WAKE_DETECTION = "wake_detection_enabled"
+        private const val PREFS_NAME = "mahi_preferences_store"
+        private const val KEY_LANGUAGE = "language"
+        private const val KEY_VOICE_GENDER = "voice_gender"
+        private const val KEY_VOICE_PITCH = "voice_pitch"
+        private const val KEY_VOICE_SPEED = "voice_speed"
+        private const val KEY_TTS_CLARITY = "tts_clarity_comp"
+        private const val KEY_CONTINUOUS = "continuous_mode"
+        private const val KEY_SUBTITLES = "show_subtitles"
+        private const val KEY_DARK_THEME = "dark_theme"
+        private const val KEY_AUTOPILOT = "autopilot_enabled"
+        private const val KEY_WAKE = "wake_detection_enabled"
+        private const val KEY_PREFER_GEMINI_LIVE = "prefer_gemini_live"
         private const val KEY_MEMORY_CONSENT = "memory_consent_granted"
-        private const val KEY_AUTOPILOT_ENABLED = "autopilot_enabled"
+        private const val KEY_ONBOARDING = "onboarding_completed"
+        private const val KEY_LAST_EXTERNAL_TARGET_PACKAGE = "last_external_target_package"
+
+        fun isValidExternalTargetPackage(pkg: String?, ownPackageName: String): Boolean {
+            val clean = pkg?.trim().orEmpty()
+            if (clean.isBlank()) return false
+            if (clean.equals(ownPackageName, ignoreCase = true)) return false
+            val lower = clean.lowercase()
+            if (lower == "com.android.systemui" || lower.contains("launcher") || lower.contains("inputmethod")) {
+                return false
+            }
+            return true
+        }
     }
 
     private val prefs: SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    private val _prefsFlow = MutableStateFlow(load())
-    val prefsFlow: StateFlow<MahiUserPrefs> = _prefsFlow.asStateFlow()
+    private val _prefsFlow = MutableStateFlow(readPrefs())
+    val prefsFlow: StateFlow<MahiUserPreferences> = _prefsFlow.asStateFlow()
 
-    private fun load(): MahiUserPrefs {
-        val lang = AppLanguage.fromId(prefs.getString(KEY_LANGUAGE, AppLanguage.ENGLISH.id))
-        val theme = AppThemeMode.fromId(prefs.getString(KEY_THEME_MODE, AppThemeMode.DARK.id))
-        val autoLang = prefs.getBoolean(KEY_AUTO_LANGUAGE, true)
-        val ptt = prefs.getBoolean(KEY_PUSH_TO_TALK, false)
-        val wakeEnabled = prefs.getBoolean(KEY_WAKE_DETECTION, false)
-        val memoryConsent = prefs.getBoolean(KEY_MEMORY_CONSENT, false)
-        val autopilotEnabled = prefs.getBoolean(KEY_AUTOPILOT_ENABLED, false)
-        return MahiUserPrefs(
+    private fun readPrefs(): MahiUserPreferences {
+        val lang = runCatching {
+            AppLanguage.valueOf(prefs.getString(KEY_LANGUAGE, AppLanguage.ENGLISH.name) ?: AppLanguage.ENGLISH.name)
+        }.getOrDefault(AppLanguage.ENGLISH)
+        val gender = runCatching {
+            MahiVoiceGender.valueOf(prefs.getString(KEY_VOICE_GENDER, MahiVoiceGender.FEMALE.name) ?: MahiVoiceGender.FEMALE.name)
+        }.getOrDefault(MahiVoiceGender.FEMALE)
+        return MahiUserPreferences(
             language = lang,
-            themeMode = theme,
-            autoLanguageDetection = autoLang,
-            pushToTalkMode = ptt,
-            wakeDetectionEnabled = wakeEnabled,
-            memoryConsentGranted = memoryConsent,
-            autopilotEnabled = autopilotEnabled
+            voiceGender = gender,
+            voicePitch = prefs.getFloat(KEY_VOICE_PITCH, 1.05f).coerceIn(0.6f, 1.6f),
+            voiceSpeed = prefs.getFloat(KEY_VOICE_SPEED, 1.05f).coerceIn(0.5f, 2.0f),
+            ttsClarityCompensation = prefs.getBoolean(KEY_TTS_CLARITY, true),
+            isContinuousMode = prefs.getBoolean(KEY_CONTINUOUS, true),
+            showSubtitles = prefs.getBoolean(KEY_SUBTITLES, true),
+            darkTheme = prefs.getBoolean(KEY_DARK_THEME, true),
+            autopilotEnabled = prefs.getBoolean(KEY_AUTOPILOT, false),
+            wakeDetectionEnabled = prefs.getBoolean(KEY_WAKE, false),
+            preferGeminiLiveVoice = prefs.getBoolean(KEY_PREFER_GEMINI_LIVE, true),
+            memoryConsentGranted = prefs.getBoolean(KEY_MEMORY_CONSENT, false),
+            onboardingCompleted = prefs.getBoolean(KEY_ONBOARDING, false),
+            lastExternalTargetPackage = prefs.getString(KEY_LAST_EXTERNAL_TARGET_PACKAGE, "").orEmpty()
         )
     }
 
-    fun setLanguage(language: AppLanguage) {
-        prefs.edit().putString(KEY_LANGUAGE, language.id).commit()
-        _prefsFlow.value = _prefsFlow.value.copy(language = language)
+    private fun commitUpdate(mutator: SharedPreferences.Editor.() -> Unit) {
+        prefs.edit().apply(mutator).commit()
+        _prefsFlow.value = readPrefs()
     }
 
-    fun setThemeMode(themeMode: AppThemeMode) {
-        prefs.edit().putString(KEY_THEME_MODE, themeMode.id).commit()
-        _prefsFlow.value = _prefsFlow.value.copy(themeMode = themeMode)
+    fun setLanguage(language: AppLanguage) = commitUpdate { putString(KEY_LANGUAGE, language.name) }
+    fun setVoiceGender(gender: MahiVoiceGender) = commitUpdate { putString(KEY_VOICE_GENDER, gender.name) }
+    fun setVoicePitch(pitch: Float) = commitUpdate { putFloat(KEY_VOICE_PITCH, pitch.coerceIn(0.6f, 1.6f)) }
+    fun setVoiceSpeed(speed: Float) = commitUpdate { putFloat(KEY_VOICE_SPEED, speed.coerceIn(0.5f, 2.0f)) }
+    fun setTtsClarityCompensation(enabled: Boolean) = commitUpdate { putBoolean(KEY_TTS_CLARITY, enabled) }
+    fun setContinuousMode(enabled: Boolean) = commitUpdate { putBoolean(KEY_CONTINUOUS, enabled) }
+    fun setShowSubtitles(show: Boolean) = commitUpdate { putBoolean(KEY_SUBTITLES, show) }
+    fun setDarkTheme(dark: Boolean) = commitUpdate { putBoolean(KEY_DARK_THEME, dark) }
+    fun setAutopilotEnabled(enabled: Boolean) = commitUpdate { putBoolean(KEY_AUTOPILOT, enabled) }
+    fun setWakeDetectionEnabled(enabled: Boolean) = commitUpdate { putBoolean(KEY_WAKE, enabled) }
+    fun setPreferGeminiLiveVoice(prefer: Boolean) = commitUpdate { putBoolean(KEY_PREFER_GEMINI_LIVE, prefer) }
+    fun setMemoryConsentGranted(granted: Boolean) = commitUpdate { putBoolean(KEY_MEMORY_CONSENT, granted) }
+    fun setOnboardingCompleted(done: Boolean) = commitUpdate { putBoolean(KEY_ONBOARDING, done) }
+
+    fun getLastExternalTargetPackage(): String = _prefsFlow.value.lastExternalTargetPackage
+
+    fun setLastExternalTargetPackage(packageName: String) {
+        val clean = packageName.trim()
+        if (clean.isBlank()) return
+        commitUpdate { putString(KEY_LAST_EXTERNAL_TARGET_PACKAGE, clean) }
     }
 
-    fun setAutoLanguageDetection(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_AUTO_LANGUAGE, enabled).commit()
-        _prefsFlow.value = _prefsFlow.value.copy(autoLanguageDetection = enabled)
-    }
-
-    fun setPushToTalkMode(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_PUSH_TO_TALK, enabled).commit()
-        _prefsFlow.value = _prefsFlow.value.copy(pushToTalkMode = enabled)
-    }
-
-    fun setWakeDetectionEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_WAKE_DETECTION, enabled).commit()
-        _prefsFlow.value = _prefsFlow.value.copy(wakeDetectionEnabled = enabled)
-    }
-
-    fun setMemoryConsentGranted(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_MEMORY_CONSENT, enabled).commit()
-        _prefsFlow.value = _prefsFlow.value.copy(memoryConsentGranted = enabled)
-    }
-
-    fun setAutopilotEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_AUTOPILOT_ENABLED, enabled).commit()
-        _prefsFlow.value = _prefsFlow.value.copy(autopilotEnabled = enabled)
+    fun clearLastExternalTargetPackage() {
+        commitUpdate { remove(KEY_LAST_EXTERNAL_TARGET_PACKAGE) }
     }
 }

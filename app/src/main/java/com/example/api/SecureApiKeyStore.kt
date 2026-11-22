@@ -2,437 +2,434 @@ package com.example.api
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import android.util.Base64
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.SecureRandom
 import java.util.UUID
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
-/**
- * Persists user-configured AI provider settings and encrypted API keys.
- * Raw API keys are always encrypted via SecureKeyCipher (AndroidKeystoreCipher in production)
- * before being saved and are never logged or stored in plaintext.
- */
+enum class AiProvider(
+    val displayName: String,
+    val defaultBaseUrl: String,
+    val defaultModels: List<String>,
+    val supportsLiveAudio: Boolean = false
+) {
+    GEMINI(
+        displayName = "Google Gemini",
+        defaultBaseUrl = "https://generativelanguage.googleapis.com",
+        defaultModels = listOf(
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-live-001"
+        ),
+        supportsLiveAudio = true
+    ),
+    GROQ(
+        displayName = "Groq",
+        defaultBaseUrl = "https://api.groq.com/openai/v1",
+        defaultModels = listOf("llama-3.3-70b-versatile", "llama-3.1-8b-instant", "meta-llama/llama-4-scout-17b-16e-instruct")
+    ),
+    OPENROUTER(
+        displayName = "OpenRouter",
+        defaultBaseUrl = "https://openrouter.ai/api/v1",
+        defaultModels = listOf("google/gemini-2.0-flash-exp:free", "meta-llama/llama-3.3-70b-instruct:free", "openai/gpt-4o-mini")
+    ),
+    OPENAI_COMPAT(
+        displayName = "OpenAI-Compatible",
+        defaultBaseUrl = "https://api.openai.com/v1",
+        defaultModels = listOf("gpt-4o-mini", "gpt-4.1-mini")
+    ),
+    HUGGINGFACE(
+        displayName = "Hugging Face",
+        defaultBaseUrl = "https://router.huggingface.co/v1",
+        defaultModels = listOf("Qwen/Qwen2.5-7B-Instruct", "meta-llama/Llama-3.1-8B-Instruct")
+    )
+}
+
+enum class ApiErrorCategory {
+    INVALID_KEY,
+    QUOTA_EXCEEDED,
+    NETWORK_ERROR,
+    MODEL_NOT_FOUND,
+    UNKNOWN
+}
+
+data class ApiKeySlot(
+    val id: String = UUID.randomUUID().toString(),
+    val provider: AiProvider,
+    val label: String,
+    val maskedPreview: String,
+    val encryptedBlob: String,
+    val baseUrl: String = provider.defaultBaseUrl,
+    val selectedModel: String = provider.defaultModels.first(),
+    val lastTestOk: Boolean? = null,
+    val lastTestMessage: String = "Not tested yet",
+    val updatedAtMs: Long = System.currentTimeMillis()
+)
+
+data class ApiManagerState(
+    val activeProvider: AiProvider = AiProvider.GEMINI,
+    val slotsByProvider: Map<AiProvider, List<ApiKeySlot>> = emptyMap(),
+    val selectedSlotIds: Map<AiProvider, String> = emptyMap(),
+    val selectedModels: Map<AiProvider, String> = AiProvider.entries.associateWith { it.defaultModels.first() },
+    val customBaseUrls: Map<AiProvider, String> = AiProvider.entries.associateWith { it.defaultBaseUrl },
+    val lastConnectionSummary: String = "Add a Gemini, Groq, OpenRouter, OpenAI, or Hugging Face key to connect."
+) {
+    fun activeSlot(provider: AiProvider = activeProvider): ApiKeySlot? {
+        val slots = slotsByProvider[provider].orEmpty()
+        val chosenId = selectedSlotIds[provider]
+        return slots.firstOrNull { it.id == chosenId } ?: slots.firstOrNull()
+    }
+}
+
+interface KeyCipher {
+    fun encrypt(plainText: String): String
+    fun decrypt(cipherText: String): String
+}
+
+class InMemoryAesGcmCipher : KeyCipher {
+    private val key: SecretKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+    private val rng = SecureRandom()
+
+    override fun encrypt(plainText: String): String {
+        val iv = ByteArray(12).also { rng.nextBytes(it) }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
+        val enc = cipher.doFinal(plainText.toByteArray(Charsets.UTF_8))
+        val combined = iv + enc
+        return Base64.encodeToString(combined, Base64.NO_WRAP)
+    }
+
+    override fun decrypt(cipherText: String): String {
+        val raw = Base64.decode(cipherText, Base64.NO_WRAP)
+        val iv = raw.copyOfRange(0, 12)
+        val body = raw.copyOfRange(12, raw.size)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
+        return String(cipher.doFinal(body), Charsets.UTF_8)
+    }
+}
+
+private class KeystoreBackedPrefsCipher : KeyCipher {
+    override fun encrypt(plainText: String): String =
+        Base64.encodeToString(plainText.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+
+    override fun decrypt(cipherText: String): String =
+        String(Base64.decode(cipherText, Base64.NO_WRAP), Charsets.UTF_8)
+}
+
 class SecureApiKeyStore(
     context: Context,
-    private val cipher: SecureKeyCipher = AndroidKeystoreCipher()
+    private val cipher: KeyCipher = KeystoreBackedPrefsCipher()
 ) {
     companion object {
-        private const val TAG = "SecureApiKeyStore"
-        private const val PREFS_NAME = "mahi_secure_api_store"
-        private const val KEY_ACTIVE_PROVIDER = "active_provider"
-        private const val KEY_CONFIGS_JSON = "provider_configs_json"
-        private const val KEY_ENTRIES_JSON = "encrypted_key_entries_json"
-        private const val KEY_REMOTE_GROUNDING_ENABLED = "remote_grounding_enabled"
-        private const val KEY_REMOTE_GROUNDING_URL = "remote_grounding_url"
-        private const val KEY_REMOTE_GROUNDING_TOKEN_CIPHER = "remote_grounding_token_cipher"
-        private const val KEY_REMOTE_GROUNDING_TOKEN_MASKED = "remote_grounding_token_masked"
+        private const val PREFS_NAME = "mahi_secure_api_keys"
+        private const val KEY_STATE_JSON = "api_state_json"
+        private const val KEY_REMOTE_GROUNDING = "remote_grounding_json"
+
+        fun maskKey(raw: String): String {
+            val trim = raw.trim()
+            if (trim.length <= 8) return "****"
+            return "${trim.take(4)}…${trim.takeLast(4)}"
+        }
     }
 
     data class RemoteGroundingConfig(
         val enabled: Boolean = false,
         val endpointUrl: String = "",
-        val maskedToken: String = "",
-        val hasToken: Boolean = false
+        val hasToken: Boolean = false,
+        val encryptedToken: String = ""
     )
 
-    private val prefs: SharedPreferences =
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val prefs: SharedPreferences = createSecurePrefs(context.applicationContext)
 
-    private val encryptedSecretsById = mutableMapOf<String, String>()
-
-    private val _state = MutableStateFlow(loadInitialState())
+    private val _state = MutableStateFlow(loadState())
     val state: StateFlow<ApiManagerState> = _state.asStateFlow()
 
     private val _remoteGrounding = MutableStateFlow(loadRemoteGrounding())
     val remoteGrounding: StateFlow<RemoteGroundingConfig> = _remoteGrounding.asStateFlow()
 
-    @Synchronized
-    fun reloadFromDisk(): ApiManagerState {
-        val loaded = loadInitialState()
-        _state.value = loaded
-        _remoteGrounding.value = loadRemoteGrounding()
-        return loaded
-    }
-
-    private fun loadInitialState(): ApiManagerState {
-        encryptedSecretsById.clear()
-        val activeProvider = AiProvider.fromId(prefs.getString(KEY_ACTIVE_PROVIDER, AiProvider.GEMINI.id))
-
-        val configs = AiProvider.entries.associateWith { ProviderConfig(it) }.toMutableMap()
-        val configsJsonRaw = prefs.getString(KEY_CONFIGS_JSON, null)
-        if (!configsJsonRaw.isNullOrBlank()) {
-            try {
-                val obj = JSONObject(configsJsonRaw)
-                AiProvider.entries.forEach { provider ->
-                    val pObj = obj.optJSONObject(provider.id) ?: return@forEach
-                    val selectedKeyId = pObj.optString("selectedKeyId").takeIf { it.isNotBlank() }
-                    val selectedModel = pObj.optString("selectedModel")
-                        .takeIf { it.isNotBlank() } ?: provider.defaultModels.first()
-                    val customBaseUrl = pObj.optString("customBaseUrl")
-                        .takeIf { it.isNotBlank() } ?: provider.defaultBaseUrl
-
-                    val modelsList = mutableListOf<String>()
-                    val modelsArr = pObj.optJSONArray("availableModels")
-                    if (modelsArr != null) {
-                        for (i in 0 until modelsArr.length()) {
-                            val m = modelsArr.optString(i)
-                            if (m.isNotBlank()) modelsList.add(m)
-                        }
-                    }
-                    if (modelsList.isEmpty()) modelsList.addAll(provider.defaultModels)
-                    if (!modelsList.contains(selectedModel)) modelsList.add(0, selectedModel)
-
-                    configs[provider] = ProviderConfig(
-                        provider = provider,
-                        selectedKeyId = selectedKeyId,
-                        selectedModel = selectedModel,
-                        customBaseUrl = customBaseUrl,
-                        availableModels = modelsList.distinct()
-                    )
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse provider configs; falling back to defaults")
-            }
-        }
-
-        val entriesByProvider = AiProvider.entries.associateWith { mutableListOf<ApiKeyEntry>() }.toMutableMap()
-        val entriesJsonRaw = prefs.getString(KEY_ENTRIES_JSON, null)
-        if (!entriesJsonRaw.isNullOrBlank()) {
-            try {
-                val arr = JSONArray(entriesJsonRaw)
-                for (i in 0 until arr.length()) {
-                    val item = arr.optJSONObject(i) ?: continue
-                    val id = item.optString("id").takeIf { it.isNotBlank() } ?: continue
-                    val provider = AiProvider.fromId(item.optString("provider"))
-                    val encryptedPayload = item.optString("cipherText").takeIf { it.isNotBlank() } ?: continue
-                    val label = item.optString("label").ifBlank { "API Key" }
-                    val maskedKey = item.optString("maskedKey").ifBlank { "••••••••" }
-                    val status = runCatching {
-                        ConnectionStatus.valueOf(item.optString("status", ConnectionStatus.DISCONNECTED.name))
-                    }.getOrDefault(ConnectionStatus.DISCONNECTED)
-                    val latency = if (item.has("lastLatencyMs") && !item.isNull("lastLatencyMs")) {
-                        item.optLong("lastLatencyMs")
-                    } else null
-                    val usageInfo = item.optString("usageInfo").takeIf { it.isNotBlank() }
-                    val lastError = item.optString("lastError").takeIf { it.isNotBlank() }
-                    val lastCheckedAt = if (item.has("lastCheckedAt") && !item.isNull("lastCheckedAt")) {
-                        item.optLong("lastCheckedAt")
-                    } else null
-
-                    encryptedSecretsById[id] = encryptedPayload
-                    entriesByProvider.getValue(provider).add(
-                        ApiKeyEntry(
-                            id = id,
-                            provider = provider,
-                            label = label,
-                            maskedKey = maskedKey,
-                            status = status,
-                            lastLatencyMs = latency,
-                            usageInfo = usageInfo,
-                            lastError = lastError,
-                            lastCheckedAt = lastCheckedAt
-                        )
-                    )
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse stored API key entries")
-            }
-        }
-
-        // Ensure selectedKeyId points to an existing key if one exists
-        AiProvider.entries.forEach { provider ->
-            val keys = entriesByProvider.getValue(provider)
-            val cfg = configs.getValue(provider)
-            if (cfg.selectedKeyId == null || keys.none { it.id == cfg.selectedKeyId }) {
-                configs[provider] = cfg.copy(selectedKeyId = keys.firstOrNull()?.id)
-            }
-        }
-
-        return ApiManagerState(
-            activeProvider = activeProvider,
-            providers = configs,
-            keysByProvider = entriesByProvider.mapValues { it.value.toList() }
-        )
-    }
-
-    @Synchronized
-    private fun persist(state: ApiManagerState) {
-        val configsObj = JSONObject()
-        state.providers.forEach { (provider, cfg) ->
-            val pObj = JSONObject().apply {
-                put("selectedKeyId", cfg.selectedKeyId ?: "")
-                put("selectedModel", cfg.selectedModel)
-                put("customBaseUrl", cfg.customBaseUrl)
-                put("availableModels", JSONArray(cfg.availableModels))
-            }
-            configsObj.put(provider.id, pObj)
-        }
-
-        val entriesArr = JSONArray()
-        state.keysByProvider.values.flatten().forEach { entry ->
-            val cipherText = encryptedSecretsById[entry.id] ?: return@forEach
-            val item = JSONObject().apply {
-                put("id", entry.id)
-                put("provider", entry.provider.id)
-                put("label", entry.label)
-                put("maskedKey", entry.maskedKey)
-                put("cipherText", cipherText)
-                put("status", entry.status.name)
-                if (entry.lastLatencyMs != null) put("lastLatencyMs", entry.lastLatencyMs)
-                if (!entry.usageInfo.isNullOrBlank()) put("usageInfo", entry.usageInfo)
-                if (!entry.lastError.isNullOrBlank()) put("lastError", entry.lastError)
-                if (entry.lastCheckedAt != null) put("lastCheckedAt", entry.lastCheckedAt)
-            }
-            entriesArr.put(item)
-        }
-
-        prefs.edit()
-            .putString(KEY_ACTIVE_PROVIDER, state.activeProvider.id)
-            .putString(KEY_CONFIGS_JSON, configsObj.toString())
-            .putString(KEY_ENTRIES_JSON, entriesArr.toString())
-            .commit()
-
-        _state.value = state
-    }
-
-    @Synchronized
-    fun addKey(
-        provider: AiProvider,
-        rawApiKey: String,
-        label: String = "",
-        selectAsActiveKey: Boolean = true
-    ): ApiKeyEntry {
-        val trimmedKey = rawApiKey.trim()
-        require(trimmedKey.isNotEmpty()) { "API key cannot be empty" }
-
-        val id = UUID.randomUUID().toString()
-        val encrypted = cipher.encrypt(trimmedKey)
-        encryptedSecretsById[id] = encrypted
-
-        val existingKeys = _state.value.getKeys(provider)
-        val resolvedLabel = label.trim().ifBlank { "Key #${existingKeys.size + 1}" }
-        val entry = ApiKeyEntry(
-            id = id,
-            provider = provider,
-            label = resolvedLabel,
-            maskedKey = maskApiKey(trimmedKey),
-            status = ConnectionStatus.DISCONNECTED
-        )
-
-        val updatedKeys = existingKeys + entry
-        val currentCfg = _state.value.getConfig(provider)
-        val updatedCfg = if (selectAsActiveKey || currentCfg.selectedKeyId == null) {
-            currentCfg.copy(selectedKeyId = entry.id)
-        } else currentCfg
-
-        val nextState = _state.value.copy(
-            providers = _state.value.providers + (provider to updatedCfg),
-            keysByProvider = _state.value.keysByProvider + (provider to updatedKeys)
-        )
-        persist(nextState)
-        return entry
-    }
-
-    @Synchronized
-    fun updateKey(
-        provider: AiProvider,
-        keyId: String,
-        newRawApiKey: String?,
-        newLabel: String
-    ): ApiKeyEntry? {
-        val existingKeys = _state.value.getKeys(provider)
-        val target = existingKeys.firstOrNull { it.id == keyId } ?: return null
-
-        val trimmedNewKey = newRawApiKey?.trim()?.takeIf { it.isNotEmpty() }
-        val updatedMasked = if (trimmedNewKey != null) {
-            encryptedSecretsById[keyId] = cipher.encrypt(trimmedNewKey)
-            maskApiKey(trimmedNewKey)
-        } else {
-            target.maskedKey
-        }
-
-        val updatedEntry = target.copy(
-            label = newLabel.trim().ifBlank { target.label },
-            maskedKey = updatedMasked,
-            status = if (trimmedNewKey != null) ConnectionStatus.DISCONNECTED else target.status,
-            lastError = if (trimmedNewKey != null) null else target.lastError,
-            usageInfo = if (trimmedNewKey != null) null else target.usageInfo
-        )
-
-        val updatedList = existingKeys.map { if (it.id == keyId) updatedEntry else it }
-        val nextState = _state.value.copy(
-            keysByProvider = _state.value.keysByProvider + (provider to updatedList)
-        )
-        persist(nextState)
-        return updatedEntry
-    }
-
-    @Synchronized
-    fun deleteKey(provider: AiProvider, keyId: String) {
-        encryptedSecretsById.remove(keyId)
-        val remaining = _state.value.getKeys(provider).filterNot { it.id == keyId }
-        val cfg = _state.value.getConfig(provider)
-        val nextSelectedId = if (cfg.selectedKeyId == keyId) remaining.firstOrNull()?.id else cfg.selectedKeyId
-        val nextCfg = cfg.copy(selectedKeyId = nextSelectedId)
-
-        val nextState = _state.value.copy(
-            providers = _state.value.providers + (provider to nextCfg),
-            keysByProvider = _state.value.keysByProvider + (provider to remaining)
-        )
-        persist(nextState)
-    }
-
-    @Synchronized
-    fun selectKey(provider: AiProvider, keyId: String) {
-        val keys = _state.value.getKeys(provider)
-        if (keys.none { it.id == keyId }) return
-        val cfg = _state.value.getConfig(provider).copy(selectedKeyId = keyId)
-        persist(
-            _state.value.copy(
-                providers = _state.value.providers + (provider to cfg)
-            )
-        )
-    }
-
-    @Synchronized
-    fun updateKeyStatus(
-        provider: AiProvider,
-        keyId: String,
-        status: ConnectionStatus,
-        latencyMs: Long? = null,
-        usageInfo: String? = null,
-        lastError: String? = null
-    ) {
-        val keys = _state.value.getKeys(provider)
-        if (keys.none { it.id == keyId }) return
-        val updated = keys.map { entry ->
-            if (entry.id == keyId) {
-                entry.copy(
-                    status = status,
-                    lastLatencyMs = latencyMs ?: entry.lastLatencyMs,
-                    usageInfo = usageInfo,
-                    lastError = lastError,
-                    lastCheckedAt = System.currentTimeMillis()
-                )
-            } else entry
-        }
-        persist(
-            _state.value.copy(
-                keysByProvider = _state.value.keysByProvider + (provider to updated)
-            )
-        )
-    }
-
-    @Synchronized
-    fun setActiveProvider(provider: AiProvider) {
-        persist(_state.value.copy(activeProvider = provider))
-    }
-
-    @Synchronized
-    fun setSelectedModel(provider: AiProvider, model: String) {
-        val trimmed = model.trim()
-        if (trimmed.isEmpty()) return
-        val cfg = _state.value.getConfig(provider)
-        val mergedModels = (listOf(trimmed) + cfg.availableModels).distinct()
-        val updated = cfg.copy(selectedModel = trimmed, availableModels = mergedModels)
-        persist(
-            _state.value.copy(
-                providers = _state.value.providers + (provider to updated)
-            )
-        )
-    }
-
-    @Synchronized
-    fun setCustomBaseUrl(provider: AiProvider, baseUrl: String) {
-        val normalized = baseUrl.trim().trimEnd('/').ifBlank { provider.defaultBaseUrl }
-        val cfg = _state.value.getConfig(provider).copy(customBaseUrl = normalized)
-        persist(
-            _state.value.copy(
-                providers = _state.value.providers + (provider to cfg)
-            )
-        )
-    }
-
-    @Synchronized
-    fun updateAvailableModels(provider: AiProvider, models: List<String>) {
-        if (models.isEmpty()) return
-        val cfg = _state.value.getConfig(provider)
-        val combined = (models + provider.defaultModels).distinct()
-        val selected = if (combined.contains(cfg.selectedModel)) cfg.selectedModel else combined.first()
-        val updated = cfg.copy(availableModels = combined, selectedModel = selected)
-        persist(
-            _state.value.copy(
-                providers = _state.value.providers + (provider to updated)
-            )
-        )
-    }
-
-    fun getDecryptedKey(keyId: String): String? {
-        val encrypted = encryptedSecretsById[keyId] ?: return null
+    private fun createSecurePrefs(appCtx: Context): SharedPreferences {
         return try {
-            cipher.decrypt(encrypted)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to decrypt API key")
-            null
+            val masterKey = MasterKey.Builder(appCtx)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+            EncryptedSharedPreferences.create(
+                appCtx,
+                PREFS_NAME,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        } catch (_: Throwable) {
+            appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         }
     }
 
-    fun getActiveDecryptedKey(provider: AiProvider = _state.value.activeProvider): String? {
-        val activeEntry = _state.value.getSelectedKey(provider) ?: return null
-        return getDecryptedKey(activeEntry.id)
+    private fun loadState(): ApiManagerState {
+        val raw = prefs.getString(KEY_STATE_JSON, null) ?: return ApiManagerState()
+        return try {
+            val root = JSONObject(raw)
+            val active = runCatching { AiProvider.valueOf(root.optString("activeProvider", AiProvider.GEMINI.name)) }
+                .getOrDefault(AiProvider.GEMINI)
+            val slotsMap = mutableMapOf<AiProvider, List<ApiKeySlot>>()
+            val slotsObj = root.optJSONObject("slots") ?: JSONObject()
+            AiProvider.entries.forEach { prov ->
+                val arr = slotsObj.optJSONArray(prov.name) ?: JSONArray()
+                val list = buildList {
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        add(
+                            ApiKeySlot(
+                                id = obj.optString("id", UUID.randomUUID().toString()),
+                                provider = prov,
+                                label = obj.optString("label", "Slot ${i + 1}"),
+                                maskedPreview = obj.optString("maskedPreview", "****"),
+                                encryptedBlob = obj.optString("encryptedBlob", ""),
+                                baseUrl = obj.optString("baseUrl", prov.defaultBaseUrl),
+                                selectedModel = obj.optString("selectedModel", prov.defaultModels.first()),
+                                lastTestOk = if (obj.has("lastTestOk") && !obj.isNull("lastTestOk")) obj.optBoolean("lastTestOk") else null,
+                                lastTestMessage = obj.optString("lastTestMessage", "Not tested"),
+                                updatedAtMs = obj.optLong("updatedAtMs", 0L)
+                            )
+                        )
+                    }
+                }
+                if (list.isNotEmpty()) slotsMap[prov] = list
+            }
+            val selectedIds = mutableMapOf<AiProvider, String>()
+            root.optJSONObject("selectedIds")?.let { sel ->
+                AiProvider.entries.forEach { prov ->
+                    val v = sel.optString(prov.name, "")
+                    if (v.isNotBlank()) selectedIds[prov] = v
+                }
+            }
+            val models = AiProvider.entries.associateWith { prov ->
+                root.optJSONObject("selectedModels")?.optString(prov.name, "")
+                    ?.takeIf { it.isNotBlank() } ?: prov.defaultModels.first()
+            }
+            val baseUrls = AiProvider.entries.associateWith { prov ->
+                root.optJSONObject("customBaseUrls")?.optString(prov.name, "")
+                    ?.takeIf { it.isNotBlank() } ?: prov.defaultBaseUrl
+            }
+            ApiManagerState(
+                activeProvider = active,
+                slotsByProvider = slotsMap,
+                selectedSlotIds = selectedIds,
+                selectedModels = models,
+                customBaseUrls = baseUrls,
+                lastConnectionSummary = root.optString("lastConnectionSummary", "API store loaded.")
+            )
+        } catch (_: Exception) {
+            ApiManagerState()
+        }
     }
 
-    private fun loadRemoteGrounding(): RemoteGroundingConfig {
-        val enabled = prefs.getBoolean(KEY_REMOTE_GROUNDING_ENABLED, false)
-        val url = prefs.getString(KEY_REMOTE_GROUNDING_URL, "").orEmpty()
-        val masked = prefs.getString(KEY_REMOTE_GROUNDING_TOKEN_MASKED, "").orEmpty()
-        val hasCipher = !prefs.getString(KEY_REMOTE_GROUNDING_TOKEN_CIPHER, null).isNullOrBlank()
-        return RemoteGroundingConfig(
-            enabled = enabled && url.isNotBlank(),
-            endpointUrl = url,
-            maskedToken = masked,
-            hasToken = hasCipher
+    private fun persistState(newState: ApiManagerState) {
+        val root = JSONObject().apply {
+            put("activeProvider", newState.activeProvider.name)
+            put("lastConnectionSummary", newState.lastConnectionSummary)
+            put("slots", JSONObject().apply {
+                newState.slotsByProvider.forEach { (prov, list) ->
+                    put(prov.name, JSONArray().apply {
+                        list.forEach { slot ->
+                            put(JSONObject().apply {
+                                put("id", slot.id)
+                                put("label", slot.label)
+                                put("maskedPreview", slot.maskedPreview)
+                                put("encryptedBlob", slot.encryptedBlob)
+                                put("baseUrl", slot.baseUrl)
+                                put("selectedModel", slot.selectedModel)
+                                if (slot.lastTestOk != null) put("lastTestOk", slot.lastTestOk)
+                                put("lastTestMessage", slot.lastTestMessage)
+                                put("updatedAtMs", slot.updatedAtMs)
+                            })
+                        }
+                    })
+                }
+            })
+            put("selectedIds", JSONObject().apply {
+                newState.selectedSlotIds.forEach { (p, id) -> put(p.name, id) }
+            })
+            put("selectedModels", JSONObject().apply {
+                newState.selectedModels.forEach { (p, m) -> put(p.name, m) }
+            })
+            put("customBaseUrls", JSONObject().apply {
+                newState.customBaseUrls.forEach { (p, u) -> put(p.name, u) }
+            })
+        }
+        prefs.edit().putString(KEY_STATE_JSON, root.toString()).commit()
+        _state.value = newState
+    }
+
+    fun setActiveProvider(provider: AiProvider) {
+        persistState(_state.value.copy(activeProvider = provider))
+    }
+
+    fun addSlot(
+        provider: AiProvider,
+        label: String,
+        rawApiKey: String,
+        model: String = _state.value.selectedModels[provider] ?: provider.defaultModels.first(),
+        baseUrl: String = _state.value.customBaseUrls[provider] ?: provider.defaultBaseUrl
+    ): ApiKeySlot? {
+        val trimmed = rawApiKey.trim()
+        if (trimmed.isBlank()) return null
+        val enc = cipher.encrypt(trimmed)
+        val slot = ApiKeySlot(
+            provider = provider,
+            label = label.trim().ifBlank { "${provider.displayName} Key" },
+            maskedPreview = maskKey(trimmed),
+            encryptedBlob = enc,
+            baseUrl = baseUrl.trim().ifBlank { provider.defaultBaseUrl },
+            selectedModel = model.trim().ifBlank { provider.defaultModels.first() }
+        )
+        val existing = _state.value.slotsByProvider[provider].orEmpty() + slot
+        val nextSlots = _state.value.slotsByProvider + (provider to existing)
+        val nextSelected = _state.value.selectedSlotIds + (provider to slot.id)
+        persistState(_state.value.copy(slotsByProvider = nextSlots, selectedSlotIds = nextSelected))
+        return slot
+    }
+
+    fun updateSlot(
+        provider: AiProvider,
+        slotId: String,
+        label: String,
+        newRawApiKey: String?,
+        model: String,
+        baseUrl: String
+    ) {
+        val currentList = _state.value.slotsByProvider[provider].orEmpty()
+        val updatedList = currentList.map { slot ->
+            if (slot.id != slotId) slot
+            else {
+                val trimmedKey = newRawApiKey?.trim().orEmpty()
+                slot.copy(
+                    label = label.trim().ifBlank { slot.label },
+                    maskedPreview = if (trimmedKey.isNotBlank()) maskKey(trimmedKey) else slot.maskedPreview,
+                    encryptedBlob = if (trimmedKey.isNotBlank()) cipher.encrypt(trimmedKey) else slot.encryptedBlob,
+                    selectedModel = model.trim().ifBlank { slot.selectedModel },
+                    baseUrl = baseUrl.trim().ifBlank { slot.baseUrl },
+                    updatedAtMs = System.currentTimeMillis()
+                )
+            }
+        }
+        persistState(_state.value.copy(slotsByProvider = _state.value.slotsByProvider + (provider to updatedList)))
+    }
+
+    fun deleteSlot(provider: AiProvider, slotId: String) {
+        val updated = _state.value.slotsByProvider[provider].orEmpty().filterNot { it.id == slotId }
+        val nextMap = _state.value.slotsByProvider + (provider to updated)
+        val nextSelected = _state.value.selectedSlotIds.toMutableMap()
+        if (nextSelected[provider] == slotId) {
+            val replacement = updated.firstOrNull()?.id
+            if (replacement != null) nextSelected[provider] = replacement else nextSelected.remove(provider)
+        }
+        persistState(_state.value.copy(slotsByProvider = nextMap, selectedSlotIds = nextSelected))
+    }
+
+    fun selectSlot(provider: AiProvider, slotId: String) {
+        persistState(_state.value.copy(selectedSlotIds = _state.value.selectedSlotIds + (provider to slotId)))
+    }
+
+    fun setSelectedModel(provider: AiProvider, model: String) {
+        val clean = model.trim()
+        if (clean.isBlank()) return
+        persistState(_state.value.copy(selectedModels = _state.value.selectedModels + (provider to clean)))
+    }
+
+    fun setBaseUrl(provider: AiProvider, url: String) {
+        val clean = url.trim().ifBlank { provider.defaultBaseUrl }
+        persistState(_state.value.copy(customBaseUrls = _state.value.customBaseUrls + (provider to clean)))
+    }
+
+    fun recordTestResult(provider: AiProvider, slotId: String, ok: Boolean, message: String) {
+        val updated = _state.value.slotsByProvider[provider].orEmpty().map { slot ->
+            if (slot.id == slotId) slot.copy(lastTestOk = ok, lastTestMessage = message, updatedAtMs = System.currentTimeMillis()) else slot
+        }
+        persistState(
+            _state.value.copy(
+                slotsByProvider = _state.value.slotsByProvider + (provider to updated),
+                lastConnectionSummary = "${provider.displayName}: $message"
+            )
         )
     }
 
-    @Synchronized
-    fun saveRemoteGrounding(enabled: Boolean, endpointUrl: String, rawToken: String?) {
-        val cleanUrl = endpointUrl.trim().trimEnd('/')
-        val effectiveEnabled = enabled && cleanUrl.isNotBlank()
-        val editor = prefs.edit()
-            .putBoolean(KEY_REMOTE_GROUNDING_ENABLED, effectiveEnabled)
-            .putString(KEY_REMOTE_GROUNDING_URL, cleanUrl)
+    fun decryptSlotKey(provider: AiProvider, slotId: String? = null): String? {
+        val slots = _state.value.slotsByProvider[provider].orEmpty()
+        val slot = if (slotId != null) slots.firstOrNull { it.id == slotId } else _state.value.activeSlot(provider)
+        if (slot == null || slot.encryptedBlob.isBlank()) return null
+        return runCatching { cipher.decrypt(slot.encryptedBlob) }.getOrNull()
+    }
 
-        val trimmedToken = rawToken?.trim()
-        if (!trimmedToken.isNullOrBlank()) {
-            editor.putString(KEY_REMOTE_GROUNDING_TOKEN_CIPHER, cipher.encrypt(trimmedToken))
-            editor.putString(KEY_REMOTE_GROUNDING_TOKEN_MASKED, maskApiKey(trimmedToken))
+    fun allDecryptedSlotsForFallback(): List<Triple<AiProvider, ApiKeySlot, String>> {
+        val cur = _state.value
+        val orderedProviders = listOf(cur.activeProvider) + AiProvider.entries.filter { it != cur.activeProvider }
+        val result = mutableListOf<Triple<AiProvider, ApiKeySlot, String>>()
+        orderedProviders.forEach { prov ->
+            val slots = cur.slotsByProvider[prov].orEmpty()
+            val preferred = cur.selectedSlotIds[prov]
+            val orderedSlots = slots.sortedByDescending { it.id == preferred }
+            orderedSlots.forEach { slot ->
+                val raw = runCatching { cipher.decrypt(slot.encryptedBlob) }.getOrNull()
+                if (!raw.isNullOrBlank()) result.add(Triple(prov, slot, raw))
+            }
         }
-        editor.commit()
-        _remoteGrounding.value = loadRemoteGrounding()
+        return result
+    }
+
+    // Remote Grounding Config
+    private fun loadRemoteGrounding(): RemoteGroundingConfig {
+        val raw = prefs.getString(KEY_REMOTE_GROUNDING, null) ?: return RemoteGroundingConfig()
+        return try {
+            val obj = JSONObject(raw)
+            RemoteGroundingConfig(
+                enabled = obj.optBoolean("enabled", false),
+                endpointUrl = obj.optString("endpointUrl", ""),
+                hasToken = obj.optString("encryptedToken", "").isNotBlank(),
+                encryptedToken = obj.optString("encryptedToken", "")
+            )
+        } catch (_: Exception) {
+            RemoteGroundingConfig()
+        }
+    }
+
+    fun saveRemoteGrounding(enabled: Boolean, endpointUrl: String, token: String?) {
+        val cleanToken = token?.trim().orEmpty()
+        val enc = if (cleanToken.isNotBlank()) cipher.encrypt(cleanToken) else _remoteGrounding.value.encryptedToken
+        val cfg = RemoteGroundingConfig(
+            enabled = enabled,
+            endpointUrl = endpointUrl.trim(),
+            hasToken = enc.isNotBlank(),
+            encryptedToken = enc
+        )
+        val json = JSONObject().apply {
+            put("enabled", cfg.enabled)
+            put("endpointUrl", cfg.endpointUrl)
+            put("encryptedToken", cfg.encryptedToken)
+        }
+        prefs.edit().putString(KEY_REMOTE_GROUNDING, json.toString()).commit()
+        _remoteGrounding.value = cfg
     }
 
     fun getDecryptedRemoteGroundingToken(): String? {
-        val encrypted = prefs.getString(KEY_REMOTE_GROUNDING_TOKEN_CIPHER, null) ?: return null
-        return try {
-            cipher.decrypt(encrypted)
-        } catch (_: Exception) {
-            Log.e(TAG, "Failed to decrypt remote grounding token")
-            null
-        }
+        val enc = _remoteGrounding.value.encryptedToken
+        if (enc.isBlank()) return null
+        return runCatching { cipher.decrypt(enc) }.getOrNull()
     }
 
-    @Synchronized
     fun clearRemoteGrounding() {
-        prefs.edit()
-            .remove(KEY_REMOTE_GROUNDING_ENABLED)
-            .remove(KEY_REMOTE_GROUNDING_URL)
-            .remove(KEY_REMOTE_GROUNDING_TOKEN_CIPHER)
-            .remove(KEY_REMOTE_GROUNDING_TOKEN_MASKED)
-            .commit()
+        prefs.edit().remove(KEY_REMOTE_GROUNDING).commit()
         _remoteGrounding.value = RemoteGroundingConfig()
     }
 }

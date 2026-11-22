@@ -1,6 +1,8 @@
 {
   "name": "Mahi AI",
-  "description": "Real-time sassy and witty voice AI companion",
+  "description": "Voice-controlled Android AI assistant with Cyber Glow Compose UI, multi-provider AI brain & ModelRegistry, Gemini Live voice, CameraX, Accessibility automation, Call Assistant, and diagnostics.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/ic_mahi_launcher"
+        android:drawable="@drawable/mahi_launcher_icon_1795345692294"
         android:gravity="center" />
 </layer-list>

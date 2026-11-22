@@ -1,220 +1,150 @@
 package com.example.audio
 
 import android.content.Context
-import android.media.AudioAttributes
-import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
-import android.util.Log
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
+import android.speech.tts.Voice
+import com.example.preferences.AppLanguage
+import com.example.preferences.MahiVoiceGender
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.UUID
-import kotlin.math.abs
-import kotlin.math.sin
+
+data class EffectiveTtsParams(
+    val speechRate: Float,
+    val pitch: Float
+)
 
 /**
- * Manages TextToSpeech tuned specifically for Mahi's witty, sassy, female persona.
- * Generates synchronized live audio visualizer pulses during speech.
+ * Android TextToSpeech synthesizer for offline fallback, Settings voice previews, and Call Speaker Bridge.
+ * Note: Active Gemini Live sessions speak natively over WebSocket PCM AudioTrack (Gemini Live audio);
+ * local TTS never replaces Gemini Live.
  */
-class MahiSpeechSynthesizer(
-    private val context: Context,
-    private val useVoiceCommunicationAudio: Boolean = false
-) {
+class MahiSpeechSynthesizer(context: Context) : TextToSpeech.OnInitListener {
     companion object {
-        private const val TAG = "MahiSpeechSynthesizer"
+        const val MIN_SPEED = 0.5f
+        const val MAX_SPEED = 2.0f
+
+        /**
+         * Keeps speech crisp and natural at higher speeds (>=1.35x) by applying gentle inverse
+         * pitch compensation + safe rate clamping so Android TTS doesn't sound garbled/chipmunk-like.
+         */
+        fun computeEffectiveTtsParams(
+            requestedSpeed: Float,
+            requestedPitch: Float,
+            clarityCompensation: Boolean
+        ): EffectiveTtsParams {
+            val safeRate = requestedSpeed.coerceIn(MIN_SPEED, MAX_SPEED)
+            val basePitch = requestedPitch.coerceIn(0.65f, 1.5f)
+            val adjustedPitch = if (clarityCompensation && safeRate > 1.30f) {
+                val excess = (safeRate - 1.30f) / (MAX_SPEED - 1.30f)
+                (basePitch * (1.0f - excess * 0.14f)).coerceIn(0.82f, 1.25f)
+            } else {
+                basePitch
+            }
+            return EffectiveTtsParams(speechRate = safeRate, pitch = adjustedPitch)
+        }
+
+        fun prepareIntelligibleText(rawText: String, speechRate: Float): String {
+            var cleaned = rawText
+                .replace("—", ", ")
+                .trim()
+            if (speechRate >= 1.55f) {
+                // Insert tiny breathing commas around long clauses so fast TTS articulates clearly
+                cleaned = cleaned.replace(";", ", ")
+            }
+            return cleaned.replace(Regex("\\s+"), " ").trim()
+        }
     }
 
-    private var tts: TextToSpeech? = null
-    private var isInitialized = false
+    private val tts: TextToSpeech = TextToSpeech(context.applicationContext, this)
+    private val _isInitialized = MutableStateFlow(false)
+    val isInitialized: StateFlow<Boolean> = _isInitialized.asStateFlow()
 
     private val _isSpeaking = MutableStateFlow(false)
     val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
 
-    private val _speakingWaveform = MutableStateFlow(List(32) { 0.05f })
-    val speakingWaveform: StateFlow<List<Float>> = _speakingWaveform.asStateFlow()
+    private var currentPitch: Float = 1.05f
+    private var currentSpeed: Float = 1.05f
+    private var currentClarity: Boolean = true
+    private var currentGender: MahiVoiceGender = MahiVoiceGender.FEMALE
+    private var currentLanguage: AppLanguage = AppLanguage.ENGLISH
 
-    var onSpeechCompleted: (() -> Unit)? = null
-    var onSpeechStarted: (() -> Unit)? = null
+    var onDoneSpeaking: (() -> Unit)? = null
 
-    var pitch: Float = 1.20f // Confident, young female voice pitch
-    var speechRate: Float = 1.08f // Snappy, casual, lively cadence
-    private var activeLocale: Locale = Locale.US
-
-    private var animationJob: Job? = null
-    private val scope = CoroutineScope(Dispatchers.Default)
-
-    fun setSpeechLanguage(languageTag: String) {
-        activeLocale = Locale.forLanguageTag(languageTag)
-        if (isInitialized) {
-            configureVoice()
-        }
+    fun updateVoiceConfig(
+        pitch: Float = currentPitch,
+        speed: Float = currentSpeed,
+        clarityCompensation: Boolean = currentClarity,
+        gender: MahiVoiceGender = currentGender,
+        language: AppLanguage = currentLanguage
+    ) {
+        currentPitch = pitch.coerceIn(0.6f, 1.6f)
+        currentSpeed = speed.coerceIn(MIN_SPEED, MAX_SPEED)
+        currentClarity = clarityCompensation
+        currentGender = gender
+        currentLanguage = language
     }
 
-    fun initialize(onReady: () -> Unit = {}) {
-        if (tts != null && isInitialized) {
-            onReady()
-            return
-        }
-
-        tts = TextToSpeech(context) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                isInitialized = true
-                configureVoice()
-                setupProgressListener()
-                onReady()
-                Log.d(TAG, "Mahi TTS initialized successfully")
-            } else {
-                Log.e(TAG, "TTS Initialization failed with status: $status")
-            }
-        }
-    }
-
-    private fun configureVoice() {
-        tts?.let { engine ->
-            val usage = if (useVoiceCommunicationAudio) {
-                AudioAttributes.USAGE_VOICE_COMMUNICATION
-            } else {
-                AudioAttributes.USAGE_ASSISTANT
-            }
-            engine.setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(usage)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            val locale = activeLocale
-            val availability = engine.isLanguageAvailable(locale)
-            engine.language = if (availability >= TextToSpeech.LANG_AVAILABLE) locale else Locale.US
-            engine.setPitch(pitch)
-            engine.setSpeechRate(speechRate)
-
-            // Try to find a natural female voice
-            try {
-                val voices = engine.voices
-                if (voices != null) {
-                    val femaleVoice = voices.firstOrNull { voice ->
-                        voice.locale.language == locale.language &&
-                                (voice.name.contains("female", ignoreCase = true) ||
-                                        voice.name.contains("en-us-x-sfg", ignoreCase = true) ||
-                                        voice.name.contains("en-us-x-iol", ignoreCase = true) ||
-                                        !voice.features.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED))
-                    }
-                    if (femaleVoice != null) {
-                        engine.voice = femaleVoice
-                        Log.d(TAG, "Selected voice: ${femaleVoice.name}")
-                    }
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            _isInitialized.value = true
+            tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    _isSpeaking.value = true
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "Could not enumerate voices", e)
-            }
-        }
-    }
 
-    private fun setupProgressListener() {
-        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {
-                _isSpeaking.value = true
-                startWaveformAnimation()
-                onSpeechStarted?.invoke()
-            }
-
-            override fun onDone(utteranceId: String?) {
-                _isSpeaking.value = false
-                stopWaveformAnimation()
-                onSpeechCompleted?.invoke()
-            }
-
-            override fun onError(utteranceId: String?) {
-                _isSpeaking.value = false
-                stopWaveformAnimation()
-                onSpeechCompleted?.invoke()
-            }
-        })
-    }
-
-    fun speak(text: String, onStart: () -> Unit = {}, onDone: () -> Unit = {}) {
-        if (!isInitialized || tts == null) {
-            initialize {
-                speak(text, onStart, onDone)
-            }
-            return
-        }
-
-        stop() // Stop any previous speech
-        this.onSpeechStarted = onStart
-        this.onSpeechCompleted = onDone
-
-        // Clean text from tool tags or markdown before speech
-        val cleanText = text
-            .replace(Regex("\\[TOOL:[^\\]]+\\]"), "")
-            .replace("*", "")
-            .replace("#", "")
-            .replace("`", "")
-            .trim()
-
-        if (cleanText.isBlank()) {
-            onDone()
-            return
-        }
-
-        tts?.setPitch(pitch)
-        tts?.setSpeechRate(speechRate)
-
-        val utteranceId = UUID.randomUUID().toString()
-        val params = Bundle().apply {
-            putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
-        }
-
-        tts?.speak(cleanText, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
-    }
-
-    private fun startWaveformAnimation() {
-        animationJob?.cancel()
-        animationJob = scope.launch {
-            var phase = 0.0
-            while (isActive && _isSpeaking.value) {
-                phase += 0.25
-                val newBars = List(32) { i ->
-                    val sin1 = abs(sin(phase + i * 0.35).toFloat())
-                    val sin2 = abs(sin(phase * 1.4 - i * 0.2).toFloat())
-                    val centerFactor = 1.0f - abs(i - 16) / 16f
-                    val amp = (0.35f * sin1 + 0.65f * sin2) * (0.5f + 0.5f * centerFactor)
-                    (0.12f + amp * 0.88f).coerceIn(0.08f, 1.0f)
+                override fun onDone(utteranceId: String?) {
+                    _isSpeaking.value = false
+                    onDoneSpeaking?.invoke()
                 }
-                _speakingWaveform.value = newBars
-                delay(35) // ~30 FPS fluid update
-            }
+
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) {
+                    _isSpeaking.value = false
+                    onDoneSpeaking?.invoke()
+                }
+            })
         }
     }
 
-    private fun stopWaveformAnimation() {
-        animationJob?.cancel()
-        animationJob = null
-        _speakingWaveform.value = List(32) { 0.05f }
+    fun speak(
+        text: String,
+        language: AppLanguage = currentLanguage,
+        gender: MahiVoiceGender = currentGender,
+        speed: Float = currentSpeed,
+        pitch: Float = currentPitch,
+        clarityCompensation: Boolean = currentClarity
+    ) {
+        if (!_isInitialized.value || text.isBlank()) return
+        val params = computeEffectiveTtsParams(speed, pitch, clarityCompensation)
+        val locale = Locale.forLanguageTag(language.bcp47)
+        tts.language = locale
+        selectPreferredVoice(locale, gender)?.let { tts.voice = it }
+        tts.setSpeechRate(params.speechRate)
+        tts.setPitch(params.pitch)
+        val prepared = prepareIntelligibleText(text, params.speechRate)
+        tts.speak(prepared, TextToSpeech.QUEUE_FLUSH, null, UUID.randomUUID().toString())
+    }
+
+    private fun selectPreferredVoice(locale: Locale, gender: MahiVoiceGender): Voice? {
+        val voices = runCatching { tts.voices }.getOrNull().orEmpty()
+        if (voices.isEmpty()) return null
+        val sameLang = voices.filter { it.locale.language.equals(locale.language, ignoreCase = true) }
+        val pool = sameLang.ifEmpty { voices.toList() }
+        val hint = if (gender == MahiVoiceGender.MALE) listOf("male", "-m-", "iom", "rjs", "charon") else listOf("female", "-f-", "iob", "sfg", "aoede")
+        return pool.firstOrNull { v -> hint.any { h -> v.name.contains(h, ignoreCase = true) } } ?: pool.firstOrNull()
     }
 
     fun stop() {
-        try {
-            tts?.stop()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error stopping TTS", e)
-        }
         _isSpeaking.value = false
-        stopWaveformAnimation()
+        runCatching { tts.stop() }
     }
 
-    fun release() {
+    fun shutdown() {
         stop()
-        tts?.shutdown()
-        tts = null
-        isInitialized = false
+        runCatching { tts.shutdown() }
     }
 }
