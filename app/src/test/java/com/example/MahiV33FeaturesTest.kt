@@ -235,4 +235,11 @@ class MahiV33FeaturesTest {
         composeTestRule.onNodeWithTag("api_providers_screen").assertIsDisplayed()
         composeTestRule.onNodeWithTag("remote_grounding_toggle").performScrollTo().performClick()
     }
+
+    @Test
+    fun `configureAppCheck skips safely without exception when FirebaseApp is not configured`() {
+        val intent = android.content.Intent().putExtra("FIREBASE_APPCHECK_DEBUG_TOKEN", "dummy-debug-token")
+        com.example.util.configureAppCheck(appContext, intent)
+        assertTrue(com.google.firebase.FirebaseApp.getApps(appContext).isEmpty())
+    }
 }

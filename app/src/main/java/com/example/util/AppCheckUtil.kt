@@ -23,9 +23,13 @@ private const val RECAPTCHA_SITE_KEY_RES = "recaptcha_site_key"
  */
 fun configureAppCheck(context: Context, intent: Intent?) {
     try {
-        // 1. Ensure FirebaseApp is initialized
+        // 1. Ensure FirebaseApp is initialized (skip cleanly when no Firebase config is bundled)
         if (FirebaseApp.getApps(context).isEmpty()) {
             FirebaseApp.initializeApp(context)
+        }
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            Log.i(TAG, "FirebaseApp is not configured in this build; skipping App Check initialization.")
+            return
         }
 
         if (BuildConfig.DEBUG) {
