@@ -23,17 +23,19 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+
       - name: Accept Android SDK Licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
 
-      - name: Grant Gradle Wrapper execute permission
-        run: chmod +x ./gradlew
-
       - name: Run Unit & Robolectric Tests
-        run: ./gradlew :app:testDebugUnitTest --no-daemon --console=plain
+        run: gradle :app:testDebugUnitTest --no-daemon --console=plain
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --console=plain
+        run: gradle assembleDebug --no-daemon --console=plain
 
       - name: Decode Release Keystore (when secret configured)
         if: ${{ env.HAS_KEYSTORE == 'true' }}
@@ -48,7 +50,7 @@ jobs:
           MAHI_KEYSTORE_PASSWORD: ${{ secrets.MAHI_KEYSTORE_PASSWORD }}
           MAHI_KEY_ALIAS: ${{ secrets.MAHI_KEY_ALIAS }}
           MAHI_KEY_PASSWORD: ${{ secrets.MAHI_KEY_PASSWORD }}
-        run: ./gradlew assembleRelease --no-daemon --console=plain
+        run: gradle assembleRelease --no-daemon --console=plain
 
       - name: Generate SHA-256 Checksums
         run: |
